@@ -1,0 +1,114 @@
+
+===== 2026/08/15 22:40:26 自动启动 华夏通史·深度专题博物馆 =====
+
+===== 2026/08/15 22:40:38 自动启动 华夏通史·深度专题博物馆 =====
+
+===== 2026/08/16 11:52:52 自动启动 华夏通史·深度专题博物馆 =====
+
+===== 2026/08/16 11:55:54 自动启动 华夏通史·深度专题博物馆 =====
+
+> react-example@0.0.0 dev
+> tsx server.ts
+
+[31mfailed to load config from /Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/vite.config.ts[39m
+node:internal/fs/promises:638
+  return new FileHandle(await PromisePrototypeThen(
+                        ^
+
+Error: EPERM: operation not permitted, open '/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/.vite-temp/vite.config.ts.timestamp-1786852555079-6cd96ad06f381.mjs'
+    at async open (node:internal/fs/promises:638:25)
+    at async Object.writeFile (node:internal/fs/promises:1212:14)
+    at async loadConfigFromBundledFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49588:5)
+    at async bundleAndLoadConfigFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49433:22)
+    at async loadConfigFromFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49396:44)
+    at async resolveConfig (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:48891:24)
+    at async _createServer (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:38478:66)
+    at async startServer (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/server.ts:1112:18) {
+  errno: -1,
+  code: 'EPERM',
+  syscall: 'open',
+  path: '/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/.vite-temp/vite.config.ts.timestamp-1786852555079-6cd96ad06f381.mjs'
+}
+
+Node.js v22.14.0
+
+===== 2026/08/16 13:12:08 自动启动 华夏通史·深度专题博物馆 =====
+
+> react-example@0.0.0 dev
+> tsx server.ts
+
+[31mfailed to load config from /Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/vite.config.ts[39m
+node:internal/fs/promises:638
+  return new FileHandle(await PromisePrototypeThen(
+                        ^
+
+Error: EPERM: operation not permitted, open '/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/.vite-temp/vite.config.ts.timestamp-1786857129697-f44763ac241da.mjs'
+    at async open (node:internal/fs/promises:638:25)
+    at async Object.writeFile (node:internal/fs/promises:1212:14)
+    at async loadConfigFromBundledFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49588:5)
+    at async bundleAndLoadConfigFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49433:22)
+    at async loadConfigFromFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49396:44)
+    at async resolveConfig (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:48891:24)
+    at async _createServer (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:38478:66)
+    at async startServer (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/server.ts:1112:18) {
+  errno: -1,
+  code: 'EPERM',
+  syscall: 'open',
+  path: '/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/.vite-temp/vite.config.ts.timestamp-1786857129697-f44763ac241da.mjs'
+}
+
+Node.js v22.14.0
+
+===== 2026/08/16 13:12:33 自动启动 华夏通史·深度专题博物馆 =====
+
+> react-example@0.0.0 dev
+> tsx server.ts
+
+[31mfailed to load config from /Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/vite.config.ts[39m
+node:internal/fs/promises:638
+  return new FileHandle(await PromisePrototypeThen(
+                        ^
+
+Error: EPERM: operation not permitted, open '/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/.vite-temp/vite.config.ts.timestamp-1786857153793-e8034ef247c62.mjs'
+    at async open (node:internal/fs/promises:638:25)
+    at async Object.writeFile (node:internal/fs/promises:1212:14)
+    at async loadConfigFromBundledFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49588:5)
+    at async bundleAndLoadConfigFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49433:22)
+    at async loadConfigFromFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49396:44)
+    at async resolveConfig (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:48891:24)
+    at async _createServer (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:38478:66)
+    at async startServer (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/server.ts:1112:18) {
+  errno: -1,
+  code: 'EPERM',
+  syscall: 'open',
+  path: '/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/.vite-temp/vite.config.ts.timestamp-1786857153793-e8034ef247c62.mjs'
+}
+
+Node.js v22.14.0
+
+===== 2026/08/16 13:23:16 自动启动 华夏通史·深度专题博物馆 =====
+
+> react-example@0.0.0 dev
+> tsx server.ts
+
+[31mfailed to load config from /Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/vite.config.ts[39m
+node:internal/fs/promises:638
+  return new FileHandle(await PromisePrototypeThen(
+                        ^
+
+Error: EPERM: operation not permitted, open '/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/.vite-temp/vite.config.ts.timestamp-1786857796981-3ed830670c25c.mjs'
+    at async open (node:internal/fs/promises:638:25)
+    at async Object.writeFile (node:internal/fs/promises:1212:14)
+    at async loadConfigFromBundledFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49588:5)
+    at async bundleAndLoadConfigFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49433:22)
+    at async loadConfigFromFile (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:49396:44)
+    at async resolveConfig (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:48891:24)
+    at async _createServer (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/vite/dist/node/chunks/dep-Dm0c1Wj2.js:38478:66)
+    at async startServer (/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/server.ts:1112:18) {
+  errno: -1,
+  code: 'EPERM',
+  syscall: 'open',
+  path: '/Users/renqixia/华夏通史·深度专题博物馆 (1)_TREA _V.3.0/node_modules/.vite-temp/vite.config.ts.timestamp-1786857796981-3ed830670c25c.mjs'
+}
+
+Node.js v22.14.0
