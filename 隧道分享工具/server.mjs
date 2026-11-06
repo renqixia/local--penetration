@@ -1,140 +1,65 @@
 #!/usr/bin/env node
-/**
- * 隧道分享工具 v3 —— 单文件版（页面已内联，本文件即全部核心逻辑）
- *
- * 用法：
- *   node server.mjs            启动后手动打开 http://127.0.0.1:9800
- *   node server.mjs --open     启动后自动打开浏览器（"启动.command"双击走这条）
- *
- * 特性：
- *   - 零 npm 依赖，纯 Node 标准库；文件夹整体拷走、发给别人都能用
- *   - cloudflared 缺失自动下载（自动识别 Mac/Windows/Linux，国内镜像优先）
- *   - 每次请求都从头到尾重新打通，绝不复用旧隧道结果
- *   - 多地址并存：每次点击新开一条隧道，旧地址在工具运行期间继续可用（上限 5 条）
- *   - 两种获取方式：快速（立即返回）/ 验证后（确认地址能打开才返回，等待 DNS 全球生效）
- *   - 本地服务没起会按「启动配置.json」自动启动（含依赖自动安装）
- *   - 历史记录：每获取一次公网地址都留一条（时间 + 端口 + 地址），右侧面板可查
- *   - 绝不自动出地址：不输入端口并点击按钮，页面上不会出现任何公网地址
- *   - 仅监听 127.0.0.1，管理权不暴露公网；无任何 AI，纯既定流程
- */
+// Shared local HTTP service for the macOS App and the browser launcher.
 import http from 'node:http';
 import https from 'node:https';
-import dns from 'node:dns';
 import net from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn, exec } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { pipeline } from 'node:stream/promises';
-import { createWriteStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const LISTEN_PORT = 9800;
+const appToken = process.argv.includes('--app') ? process.env.VOIDBRIDGE_APP_TOKEN : null;
+const entry = appToken ? 'app' : 'web';
+const browserOwned = entry === 'web' && process.argv.includes('--open');
+const browserTabs = new Set();
+let browserIdleTimer;
+function waitForBrowser(delay) {
+  clearTimeout(browserIdleTimer);
+  browserIdleTimer = setTimeout(() => {
+    if (!browserTabs.size) shutdown();
+  }, delay);
+}
+const browserSessionScript = `
+  var browserSession;
+  function connectBrowserSession() {
+    if (!browserSession) browserSession = new EventSource('/api/browser-session');
+  }
+  connectBrowserSession();
+  window.addEventListener('pagehide', function(){
+    browserSession?.close();
+    browserSession = null;
+  });
+  window.addEventListener('pageshow', connectBrowserSession);
+`;
+const pageHeaders = { 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY' };
 const TOOL_DIR = path.dirname(fileURLToPath(import.meta.url));
 /* 隧道引擎（驱动）就放在工具文件夹自己的「组件」目录里：不再复制到用户主目录 ~/bin，
    整个文件夹自成一体，误删主目录内容、清理废纸篓都不影响工具运行 */
 const COMPONENT_DIR = path.join(TOOL_DIR, '组件');
-const CF_PATH = path.join(COMPONENT_DIR, os.platform() === 'win32' ? `隧道引擎-${os.platform()}-${os.arch()}.exe` : `隧道引擎-${os.platform()}-${os.arch()}`);
-const HISTORY_FILE = path.join(TOOL_DIR, '历史记录.json');    // 每次获取公网地址都追加一条
-const LAUNCH_CONFIG_FILE = path.join(TOOL_DIR, '启动配置.json'); // 端口 -> 自动启动方案
+const localEngine = path.join(COMPONENT_DIR, os.platform() === 'win32' ? `隧道引擎-${os.platform()}-${os.arch()}.exe` : `隧道引擎-${os.platform()}-${os.arch()}`);
+const CF_PATH = fs.existsSync(localEngine) ? localEngine :
+  path.join(TOOL_DIR, '虚渡.app', 'Contents', 'Resources', '组件', path.basename(localEngine));
+/* 历史记录改为内存存储：工具运行期间保留，重启自动清空，无需写文件 */
+let historyList = [];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const USE_SHELL = os.platform() === 'win32';
 
 /* ================= 隧道状态 ================= */
-let tunnelProc = null;
-let busy = false; // 一次只跑一条完整流程（预检/自动启动/建隧道）
+let stopGeneration = 0;
+let busy = false; // 一次只跑一条完整流程（预检/建隧道）
 let current = { running: false, url: null, localPort: null, startedAt: null, progress: null };
 
-/* ================= 小工具：JSON 读写 / 时间 ================= */
-function loadJson(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
-}
-function saveJson(file, data) {
-  try { fs.writeFileSync(file, JSON.stringify(data, null, 2)); }
-  catch (e) { console.error(`[警告] 写入 ${path.basename(file)} 失败：${e.message}`); }
-}
 function now() {
   const d = new Date(), p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-/* ================= cloudflared 自动安装 ================= */
-function platformAsset() {
-  const map = {
-    'darwin-arm64': 'cloudflared-darwin-arm64.tgz',
-    'darwin-x64': 'cloudflared-darwin-amd64.tgz',
-    'linux-x64': 'cloudflared-linux-amd64',
-    'linux-arm64': 'cloudflared-linux-arm64',
-    'win32-x64': 'cloudflared-windows-amd64.exe',
-  };
-  return map[`${os.platform()}-${os.arch()}`] || null;
-}
-
-async function downloadTo(url, dest) {
-  const res = await fetch(url, { redirect: 'follow' });
-  if (!res.ok || !res.body) throw new Error(`下载失败 HTTP ${res.status}`);
-  await pipeline(res.body, createWriteStream(dest));
-}
-
-function extractTgz(file) {
-  return new Promise((resolve, reject) => {
-    const t = spawn('tar', ['-xzf', file, '-C', os.tmpdir()], USE_SHELL ? { shell: true } : {});
-    t.on('close', c => (c === 0 ? resolve() : reject(new Error('解压失败'))));
-    t.on('error', reject);
-  });
-}
-
-async function ensureCloudflared(onProgress) {
+/* ================= 隧道引擎检测 ================= */
+async function ensureCloudflared() {
   if (fs.existsSync(CF_PATH)) { try { fs.chmodSync(CF_PATH, 0o755); } catch {} return; }
-  fs.mkdirSync(COMPONENT_DIR, { recursive: true });
-  // ① 优先用「组件」目录里自带的引擎/压缩包（发给他人零下载、离线可用），解压后也归位到「组件」目录
-  const pf = os.platform(), arch = os.arch();
-  const localCandidates = [
-    path.join(COMPONENT_DIR, `隧道引擎-${pf}-${arch}.tgz`),
-    path.join(COMPONENT_DIR, `cloudflared-${pf}-${arch}`),
-    path.join(COMPONENT_DIR, `cloudflared-${pf}-${arch}.tgz`),
-  ];
-  for (const c of localCandidates) {
-    if (!fs.existsSync(c)) continue;
-    if (c.endsWith('.tgz')) {
-      await extractTgz(c);
-      fs.copyFileSync(path.join(os.tmpdir(), 'cloudflared'), CF_PATH);
-      fs.rmSync(path.join(os.tmpdir(), 'cloudflared'), { force: true });
-    } else {
-      fs.copyFileSync(c, CF_PATH);
-    }
-    fs.chmodSync(CF_PATH, 0o755);
-    return;
-  }
-  // ② 组件目录没有 → 网络下载，直接存进「组件」目录（所有驱动集中在工具文件夹内，不碰系统、不放主目录）
-  const asset = platformAsset();
-  if (!asset) throw new Error(`暂不支持 ${pf}-${arch}，请手动安装 cloudflared 后重试`);
-  onProgress?.('首次使用：正在下载隧道组件（约 20MB，一次性，存进工具文件夹的「组件」目录）…');
-  const tmp = path.join(os.tmpdir(), asset);
-  // 官方源优先，第三方镜像仅作兜底；下载后校验大小（过小多半是错误页/被劫持内容），防供应链投毒
-  const urls = [
-    `https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`,
-    `https://ghfast.top/https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`,
-  ];
-  let ok = false, lastErr = null;
-  for (const u of urls) {
-    try {
-      await downloadTo(u, tmp);
-      if (fs.existsSync(tmp) && fs.statSync(tmp).size >= 5 * 1024 * 1024) { ok = true; break; }
-      lastErr = new Error('下载内容异常（文件过小），已弃用该来源');
-      fs.rmSync(tmp, { force: true });
-    } catch (e) { lastErr = e; }
-  }
-  if (!ok) throw lastErr || new Error('下载 cloudflared 失败，请检查网络');
-  if (asset.endsWith('.tgz')) {
-    await extractTgz(tmp);
-    fs.copyFileSync(path.join(os.tmpdir(), 'cloudflared'), CF_PATH);
-    fs.rmSync(path.join(os.tmpdir(), 'cloudflared'), { force: true });
-  } else {
-    fs.copyFileSync(tmp, CF_PATH);
-  }
-  fs.rmSync(tmp, { force: true });
-  fs.chmodSync(CF_PATH, 0o755);
+  throw new Error('隧道引擎未找到：组件目录中缺少 ' + path.basename(CF_PATH) + '，请重新下载完整安装包');
 }
 
 /* ================= 本地端口预检 ================= */
@@ -147,97 +72,51 @@ function checkLocalPort(port, timeout = 1200) {
   });
 }
 
-/* ================= 自动启动本地服务（含依赖自动安装） ================= */
-function runCommand(cmd, args, cwd, timeoutMs, onProgress) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { cwd, stdio: 'ignore', shell: USE_SHELL });
-    const t = setTimeout(() => { try { p.kill(); } catch {} reject(new Error(`${cmd} 执行超时`)); }, timeoutMs);
-    p.on('exit', c => { clearTimeout(t); c === 0 ? resolve() : reject(new Error(`${cmd} 执行失败`)); });
-    p.on('error', e => { clearTimeout(t); reject(e); });
-  });
-}
-
-async function ensureLocalService(port, onProgress) {
+async function ensureLocalService(port) {
   if (await checkLocalPort(port)) return; // 服务已在运行，无需处理
-  const cfgs = loadJson(LAUNCH_CONFIG_FILE, {});
-  const cfg = cfgs[String(port)];
-  if (!cfg) throw new Error(`本地 ${port} 端口没有服务在运行，且没有为它配置自动启动方案（可在工具文件夹的「启动配置.json」里添加）`);
-  const cwd = cfg.cwd && path.isAbsolute(cfg.cwd) ? cfg.cwd : path.resolve(TOOL_DIR, cfg.cwd || '.');
-  // 换电脑使用：配置里写的还是原电脑的项目路径，这台电脑上没有 → 给出明确指引而不是报晦涩错误
-  if (cfg.cwd && !fs.existsSync(cwd)) {
-    throw new Error(`「启动配置.json」里为 ${port} 端口配置的路径在这台电脑上不存在（${cwd}）。请用文本编辑器打开该文件，把路径改成这台电脑上项目的实际位置；或先手动启动项目，再回来获取公网地址`);
-  }
-  // 诚实原则：宣称"正在自动启动"之前先做预检——条件不具备就直接说原因，绝不画饼
-  const cmd = cfg.command || 'npm';
-  const isNodeCmd = /^(npm|npx|node|pnpm|yarn|bun)$/.test(cmd);
-  if (isNodeCmd && !fs.existsSync(path.join(cwd, 'package.json'))) {
-    throw new Error(`「启动配置.json」为 ${port} 配置的目录里没有 package.json，无法用 ${cmd} 启动；请核对该端口对应的项目路径`);
-  }
-  if (isNodeCmd) {
-    const cmdOk = await new Promise(resolve => {
-      const p = spawn(cmd, ['-v'], USE_SHELL ? { shell: true, stdio: 'ignore' } : { stdio: 'ignore' });
-      const t = setTimeout(() => { try { p.kill(); } catch {} resolve(false); }, 5000);
-      p.on('exit', c => { clearTimeout(t); resolve(c === 0); });
-      p.on('error', () => { clearTimeout(t); resolve(false); });
-    });
-    if (!cmdOk) throw new Error(`启动命令「${cmd}」不可用（未安装或不在 PATH 中）；请先安装，或修改「启动配置.json」里的启动命令`);
-  }
-  // 自动补齐依赖：Node 项目缺 node_modules 时先安装（即项目所需的"驱动"）
-  if (cfg.autoInstallDeps !== false && fs.existsSync(path.join(cwd, 'package.json')) && !fs.existsSync(path.join(cwd, 'node_modules'))) {
-    onProgress?.(`正在为「${cfg.name || '端口 ' + port}」安装所需依赖（首次约 1-3 分钟）…`);
-    await runCommand('npm', ['install', '--no-audit', '--no-fund'], cwd, 10 * 60 * 1000);
-  }
-  onProgress?.(`本地 ${port} 没有服务，正在自动启动「${cfg.name || '端口 ' + port}」…`);
-  const logPath = path.join(TOOL_DIR, `服务日志-端口${port}.log`);
-  fs.appendFileSync(logPath, `\n===== ${now()} 自动启动 ${cfg.name || ''} =====\n`);
-  // stdio 必须用"已打开的文件描述符"：createWriteStream 是异步打开（fd 短暂为 null），
-  // 直接把流传给 spawn 会被 Node 拒绝（The argument 'stdio' is invalid）
-  const logFd = fs.openSync(logPath, 'a');
-  const child = spawn(cfg.command || 'npm', cfg.args || [], { cwd, detached: true, stdio: ['ignore', logFd, logFd], shell: USE_SHELL });
-  child.unref();
-  fs.closeSync(logFd); // 子进程已继承句柄副本，父进程随手关闭自己的那份
-  child.on('error', e => console.error(`[自动启动] 命令启动失败（多半是路径或命令不对）：${e.message}`));
-  // 启动即崩溃 → 秒级报错，不再干等 120 秒超时
-  let exitCode = null;
-  child.on('exit', c => { if (c !== 0 && c !== null) exitCode = c; });
-  const timeout = (cfg.readyTimeout || 120) * 1000;
-  const t0 = Date.now();
-  while (Date.now() - t0 < timeout) {
-    await sleep(1500);
-    if (exitCode !== null) throw new Error(`「${cfg.name || '端口 ' + port}」启动失败，请检查启动配置是否正确（详情见「服务日志-端口${port}.log」）`);
-    if (await checkLocalPort(port)) {
-      onProgress?.(`「${cfg.name || '端口 ' + port}」已就绪，开始打通隧道…`);
-      return;
-    }
-  }
-  throw new Error(`等待「${cfg.name || '端口 ' + port}」启动超时，可查看工具文件夹里的「服务日志-端口${port}.log」排查`);
+  throw new Error(`本地 ${port} 端口没有服务在运行。请先手动启动你的项目（如在项目目录执行 npm run dev），确认 localhost:${port} 能打开后，再回来点击「获取公网地址」`);
 }
 
 /* ================= 隧道生命周期（多地址并存） =================
    每次获取新开一条隧道，旧隧道保留运行——旧地址在工具运行期间继续可用，
    避免"点了一次新地址，刚发出去的旧地址就 530 失联"。上限 5 条，超出时淘汰最旧的。 */
 let tunnelProcs = [];
+const endingTunnels = new Map();
 
-function stopTunnel() {
-  for (const p of tunnelProcs) { try { p.kill('SIGTERM'); } catch {} }
-  tunnelProcs = [];
-  current = { running: false, url: null, localPort: null, startedAt: null, progress: null };
+function endTunnel(proc) {
+  if (endingTunnels.has(proc)) return endingTunnels.get(proc);
+  if (proc.exitCode !== null || proc.signalCode !== null || !proc.pid) return Promise.resolve();
+  const stopped = new Promise(resolve => {
+    const timer = setTimeout(() => proc.kill('SIGKILL'), 1500);
+    proc.once('exit', () => {
+      clearTimeout(timer);
+      endingTunnels.delete(proc);
+      resolve();
+    });
+    proc.kill('SIGTERM');
+  });
+  endingTunnels.set(proc, stopped);
+  return stopped;
 }
 
-/* 只杀指定地址对应的那条隧道（验证不通过、弃用死地址时用） */
-function killTunnelByUrl(url) {
-  const i = tunnelProcs.findIndex(p => p.tunnelUrl === url);
-  if (i >= 0) {
-    const p = tunnelProcs[i];
-    tunnelProcs.splice(i, 1);
-    try { p.kill('SIGTERM'); } catch {}
-    if (current.url === url) current = { running: false, url: null, localPort: null, startedAt: null, progress: null };
-  }
+async function stopTunnel() {
+  stopGeneration++;
+  const processes = [...tunnelProcs, ...endingTunnels.keys()];
+  tunnelProcs = [];
+  current = { running: false, url: null, localPort: null, startedAt: null, progress: null };
+  await Promise.all(processes.map(endTunnel));
+}
+
+async function killTunnelByUrl(url) {
+  const proc = tunnelProcs.find(p => p.tunnelUrl === url);
+  if (!proc) return;
+  tunnelProcs = tunnelProcs.filter(p => p !== proc);
+  if (current.url === url) current = { running: false, url: null, localPort: null, startedAt: null, progress: null };
+  await endTunnel(proc);
 }
 
 function startTunnel(localPort) {
   return new Promise((resolve, reject) => {
-    while (tunnelProcs.length >= 5) { const oldest = tunnelProcs.shift(); try { oldest.kill('SIGTERM'); } catch {} }
     // --protocol http2:走 TCP 443,国内网络下比默认 QUIC(UDP)稳定得多,避免 Cloudflare 1033 断连
     // --http-host-header:回源时把 Host 改写回 localhost。Vite/Webpack 等开发服务器有"允许域名"安全校验,
     //   不改写时它们会因 Host 是 xxx.trycloudflare.com 而直接拒绝(403 Blocked request),公网地址就"打不开"
@@ -245,147 +124,122 @@ function startTunnel(localPort) {
     tunnelProcs.push(proc);
     let buf = '', url = null, settled = false;
     const onData = d => {
-      buf += d.toString();
+      if (settled) return;
+      buf = (buf + d.toString()).slice(-8192);
       if (!url) {
         const m = buf.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
         if (m) {
           url = m[0];
           settled = true;
           proc.tunnelUrl = url; // 供 killTunnelByUrl 定位（验证不过时弃用死地址）
-          current.url = url;
-          current.running = true;
-          current.startedAt = Date.now();
-          current.progress = null;
+          proc.localPort = localPort;
+          proc.createdAt = now();
+          proc.health = 'pending';
+          clearTimeout(timer);
           resolve(url);
         }
       }
     };
     proc.stdout.on('data', onData);
     proc.stderr.on('data', onData);
-    proc.on('exit', () => {
+    const ended = error => {
+      clearTimeout(timer);
       tunnelProcs = tunnelProcs.filter(p => p !== proc);
-      // 只有"当前显示的这条"隧道挂了才提示断开；旧隧道退场不影响页面
       if (url && current.url === url) current.running = false;
-      if (!settled) { settled = true; reject(new Error('隧道进程提前退出，请稍后重试')); }
-    });
-    setTimeout(() => {
-      if (!settled) { settled = true; try { proc.kill(); } catch {} reject(new Error('60 秒内未取得公网地址，请检查网络后重试')); }
-    }, 60000).unref?.();
+      if (!settled) {
+        settled = true;
+        reject(error || new Error('隧道进程提前退出，请稍后重试'));
+      }
+    };
+    proc.once('error', ended);
+    proc.once('exit', () => ended());
+    const timer = setTimeout(() => {
+      if (!settled) {
+        ended(new Error('60 秒内未取得公网地址，请检查网络后重试'));
+        void endTunnel(proc);
+      }
+    }, 60000);
+
   });
 }
 
-/* ================= 历史记录：每获取一次地址都记一条 ================= */
+/* ================= 历史记录：每获取一次地址都记一条（内存存储，重启清空） ================= */
 function addHistory(port, url) {
-  const list = loadJson(HISTORY_FILE, []);
-  list.unshift({ time: now(), port, url });
-  if (list.length > 100) list.length = 100;
-  saveJson(HISTORY_FILE, list);
+  historyList.unshift({ time: now(), port, url });
+  if (historyList.length > 100) historyList.length = 100;
 }
 
-/* ================= 地址生效自检：新隧道域名 DNS 需几秒到几十秒才全球生效 =================
-   刚生成就访问会"域名不存在"，且失败结果会被系统/浏览器负缓存，用户就会觉得"地址是假的"。
-   所以拿到地址后工具自己先验证可访问（resolve4 直查 DNS 服务器 + 按解析出的 IP 直连，
-   绕开本机负缓存），确认通了才把地址交给用户。 */
-function fetchViaIp(url, ip, timeoutMs = 10000) {
+// Use the same DNS and TLS path as a visitor on this network.
+function probe(url) {
   return new Promise(resolve => {
-    let settled = false;
-    const done = (ok, code) => { if (!settled) { settled = true; resolve({ ok, code }); } };
-    const u = new URL(url);
-    const req = https.request({
-      hostname: u.hostname, port: 443, path: '/', method: 'GET', servername: u.hostname,
-      timeout: timeoutMs,
-      lookup: (host, opts, cb) => cb(null, [{ address: ip, family: 4 }]),
-    }, res => { res.resume(); done(true, res.statusCode); });
-    req.on('timeout', () => { req.destroy(); done(false, 0); });
-    req.on('error', () => done(false, 0));
-    req.end();
+    const req = https.get(url, res => {
+      resolve(res.statusCode >= 200 && res.statusCode < 300);
+      res.destroy();
+    });
+    const timer = setTimeout(() => { resolve(false); req.destroy(); }, 5000);
+    req.once('close', () => clearTimeout(timer));
+    req.once('error', () => resolve(false));
   });
 }
 
-/* 直查 trycloudflare.com 的权威 NS：源头即真相，且不会像打公共 DNS 那样把"无记录"缓存到递归服务器上 */
-let trycfNsResolver = null;
-async function getTrycfNsResolver() {
-  if (trycfNsResolver) return trycfNsResolver;
-  const r = new dns.promises.Resolver();
+const activeTunnels = () => tunnelProcs.filter(p => p.published);
+let checkingHealth = false;
+setInterval(async () => {
+  if (checkingHealth) return;
+  checkingHealth = true;
   try {
-    const ns = await dns.promises.resolveNs('trycloudflare.com');
-    if (ns.length) { r.setServers(ns.slice(0, 2)); trycfNsResolver = r; return r; }
-  } catch {}
-  r.setServers(['223.5.5.5', '119.29.29.29']); // 兜底：国内可靠公共 DNS
-  trycfNsResolver = r;
-  return r;
-}
-
-async function waitUrlLive(url, onProgress, timeoutMs = 90000) {
-  const host = new URL(url).hostname;
-  const nsResolver = await getTrycfNsResolver();
-  // 权威侧配记录需要几秒缓冲：过早去查会连累递归 DNS 缓存"无记录"，反而拖慢生效
-  await sleep(8000);
-  const t0 = Date.now();
-  let lastErr = '';
-  while (Date.now() - t0 < timeoutMs) {
-    let ips = [];
-    try { ips = await nsResolver.resolve4(host); } catch { ips = []; }
-    if (ips.length) {
-      const r = await fetchViaIp(url, ips[0]);
-      if (r.ok && r.code < 500) {
-        // 权威已生效且能打开。再等本机网络的 DNS 同步（本机浏览器走的是这条路），最多加等 45 秒
-        let systemOk = false;
-        const ts = Date.now();
-        while (Date.now() - ts < 45000) {
-          try { if ((await dns.promises.resolve4(host)).length) { systemOk = true; break; } } catch {}
-          onProgress?.('地址已全球生效，正在等本机网络 DNS 同步（同步完本机浏览器立即可开）…');
-          await sleep(1500);
-        }
-        if (!systemOk) console.log('[生效自检] 本机 DNS 同步较慢：其他网络（手机/对方）已可打开，本机浏览器可能需再等片刻');
-        return true;
-      }
-      lastErr = r.ok ? `源站返回 ${r.code}` : '连接未就绪';
-    } else {
-      lastErr = '权威 DNS 尚无记录';
-    }
-    onProgress?.(`公网地址已生成，正在等待全球生效（${lastErr}）…`);
-    await sleep(6000);
+    await Promise.all(activeTunnels().map(async p => {
+      const healthy = await probe(p.tunnelUrl);
+      p.failures = healthy ? 0 : (p.failures || 0) + 1;
+      if (healthy) p.health = 'reachable';
+      else if (p.failures >= 2) p.health = 'unreachable';
+    }));
+  } finally {
+    checkingHealth = false;
   }
-  console.log(`[生效自检] 超时：${url}（${lastErr}）`);
-  return false;
-}
+}, 15000).unref();
 
-/* ================= 完整流程：每次从头到尾走一遍，绝不复用 ================= */
 async function fullStart(port, verify = true) {
-  if (busy) throw new Error('正在处理上一个请求，请稍候再试');
+  if (busy || shuttingDown) throw new Error('正在处理上一个请求，请稍候再试');
   busy = true;
+  const generation = stopGeneration;
+  let url;
   try {
-    current = { running: false, url: null, localPort: port, startedAt: null, progress: '正在检查本地服务…' };
-    await ensureLocalService(port, m => { current.progress = m; console.log('[流程]', m); });
-    current.progress = '正在打通公网隧道…';
-    await ensureCloudflared(m => { current.progress = m; console.log('[流程]', m); });
-    let url = await startTunnel(port);
-    if (verify) {
-      // 验证后获取：确认地址真正能打开才返回（新域名 DNS 需几秒到几十秒全球生效）。
-      // cloudflared 偶尔分到"从未配好 DNS 的死地址"：验证超时就弃用它、换全新地址重试（最多 3 次）
-      let live = false;
-      for (let attempt = 1; attempt <= 3 && !live; attempt++) {
-        if (attempt > 1) {
-          current.progress = `上一个地址迟迟未生效，已弃用，正在更换新地址（第 ${attempt} 次）…`;
-          console.log(`[验证重试] 弃用未生效地址 ${url}，更换新地址重试`);
-          killTunnelByUrl(url);
-          url = await startTunnel(port);
+    current.progress = '正在检查本地服务…';
+    await ensureLocalService(port);
+    await ensureCloudflared();
+    for (let attempt = 1; attempt <= (verify ? 3 : 1); attempt++) {
+      if (generation !== stopGeneration) throw new Error('已取消');
+      current.progress = '正在建立隧道（第 ' + attempt + ' 次）…';
+      url = await startTunnel(port);
+      const proc = tunnelProcs.find(p => p.tunnelUrl === url);
+      const stillActive = () => generation === stopGeneration && tunnelProcs.includes(proc);
+      if (verify) {
+        current.progress = '正在从本机验证公网首页…';
+        const deadline = Date.now() + 30000;
+        while (stillActive() && Date.now() < deadline) {
+          if (await probe(url)) {
+            proc.health = 'reachable';
+            break;
+          }
+          if (stillActive()) await sleep(2000);
         }
-        current.progress = '公网地址已生成，正在确认可访问…';
-        live = await waitUrlLive(url, m => { current.progress = m; });
       }
-      if (!live) console.log('[提示] 连续多个地址均未在时限内生效（多为 DNS 波动），最后一条仍按生成返回');
-    } else {
-      // 快速获取：立即返回；地址全球生效需几十秒，期间打开会提示无法访问
-      console.log('[快速模式] 跳过生效验证，地址全球生效需几十秒');
+      if (stillActive() && (!verify || proc.health === 'reachable')) {
+        proc.published = true;
+        const active = activeTunnels();
+        if (active.length > 5) await killTunnelByUrl(active[0].tunnelUrl);
+        if (!stillActive()) throw new Error('已取消');
+        current = { running: true, url, localPort: port, startedAt: Date.now(), progress: null };
+        addHistory(port, url);
+        return url;
+      }
+      await killTunnelByUrl(url);
     }
-    current = { running: true, url, localPort: port, startedAt: Date.now(), progress: null };
-    addHistory(port, url);
-    return url;
+    throw new Error('公网首页验证失败：请确认本地首页返回 HTTP 2xx，或稍后重试');
   } finally {
     busy = false;
-    if (!current.running) current = { running: false, url: null, localPort: null, startedAt: null, progress: null };
+    current.progress = null;
   }
 }
 
@@ -396,9 +250,34 @@ const ALLOWED_ORIGINS = new Set([`http://127.0.0.1:${LISTEN_PORT}`, `http://loca
 /* 敏感端口黑名单：系统/远程管理/数据库端口禁止公开（防止把 SSH、RDP 等暴露到公网） */
 const BLOCKED_PORTS = new Set([21, 22, 23, 25, 110, 135, 139, 445, 1433, 3306, 3389, 5432, 5900, 6379, 27017]);
 
+// Bound the retained data even if a local client streams an oversized body.
+function readAction(req) {
+  return new Promise(resolve => {
+    let size = 0;
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', chunk => {
+      size += Buffer.byteLength(chunk);
+      if (size <= 4096) body += chunk;
+      else resolve({ status: 413, error: '请求内容过长' });
+    });
+    req.once('error', () => resolve({ status: 400, error: '请求已中断' }));
+    req.once('end', () => {
+      if (size > 4096) return;
+      try {
+        const data = JSON.parse(body || '{}');
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error();
+        resolve({ data });
+      } catch {
+        resolve({ status: 400, error: '请求内容无效' });
+      }
+    });
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const send = (code, data, type = 'application/json; charset=utf-8', extra = {}) => {
-    res.writeHead(code, { 'Content-Type': type, ...extra });
+    res.writeHead(code, { ...pageHeaders, 'Content-Type': type, ...extra });
     res.end(typeof data === 'string' ? data : JSON.stringify(data));
   };
 
@@ -406,316 +285,456 @@ const server = http.createServer(async (req, res) => {
   if (!ALLOWED_HOSTS.has(String(req.headers.host || ''))) {
     return send(403, { error: 'forbidden host' });
   }
+  const isPage = req.method === 'GET' && (req.url === '/' || req.url === '/index.html');
+  if (req.method === 'GET' && req.url === '/api/instance') {
+    return send(200, { product: 'VoidBridge', entry });
+  }
+  if (browserOwned && !shuttingDown && req.method === 'GET' && req.url === '/api/browser-session') {
+    clearTimeout(browserIdleTimer);
+    browserTabs.add(res);
+    res.writeHead(200, { ...pageHeaders, 'Content-Type': 'text/event-stream' });
+    res.write(': connected\n\n');
+    const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), 15000);
+    res.once('close', () => {
+      clearInterval(keepAlive);
+      browserTabs.delete(res);
+      if (!shuttingDown && !browserTabs.size) waitForBrowser(4000);
+    });
+    return;
+  }
+  const appNavigation = appToken && isPage && req.headers['x-voidbridge-app'] === appToken;
+  const appSession = appToken && (req.headers.cookie || '').split(';').some(cookie =>
+    cookie.trim() === 'voidbridge-app=' + appToken);
+  if (appToken && !appNavigation && !appSession) {
+    if (isPage) return send(409, APP_ACTIVE_HTML, 'text/html; charset=utf-8');
+    return send(409, { error: '虚渡 App 正在运行。关闭 App 后，再双击「启动.command」。' });
+  }
+
   // 安全门 2：写操作必须是本页发起（application/json + 同源 Origin），防恶意网页 CSRF 操纵本地工具
   if (req.method === 'POST') {
     if (!String(req.headers['content-type'] || '').includes('application/json')) {
       return send(415, { error: 'content-type 不支持' });
     }
     const origin = String(req.headers.origin || '');
-    if (origin && !ALLOWED_ORIGINS.has(origin)) {
+    if (!ALLOWED_ORIGINS.has(origin) || origin !== 'http://' + req.headers.host) {
       return send(403, { error: 'forbidden origin' });
     }
   }
 
-  if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
-    // no-store：防止浏览器缓存旧版页面（改版后立刻生效）
-    return send(200, PAGE_HTML, 'text/html; charset=utf-8', { 'Cache-Control': 'no-store' });
+  if (req.method === 'GET' && String(req.url || '').split('?')[0] === '/media/voidbridge-promo.mp4') {
+    const file = path.join(TOOL_DIR, '介绍页面', 'media', 'voidbridge-promo.mp4');
+    let size;
+    try { size = fs.statSync(file).size; } catch { return send(404, { error: '视频不可用' }); }
+    const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range || '');
+    const start = range ? Number(range[1]) : 0;
+    const end = range && range[2] ? Math.min(size - 1, Number(range[2])) : size - 1;
+    if (start > end) return send(416, { error: 'range' }, undefined, { 'Content-Range': 'bytes */' + size });
+    res.writeHead(range ? 206 : 200, {
+      'Content-Type':'video/mp4', 'Accept-Ranges':'bytes', 'Content-Length':end-start+1,
+      'Cache-Control':'private, max-age=86400',
+      ...(range ? { 'Content-Range':'bytes '+start+'-'+end+'/'+size } : {}),
+    });
+    const stream = fs.createReadStream(file, { start, end });
+    stream.once('error', () => res.destroy());
+    res.once('close', () => stream.destroy());
+    stream.pipe(res);
+    return;
+  }
+  if (isPage) {
+    const headers = appNavigation ? {
+      'Set-Cookie': 'voidbridge-app=' + appToken + '; HttpOnly; SameSite=Strict; Path=/',
+    } : {};
+    return send(200, PAGE_HTML.replace('<!-- ENTRY -->', entry === 'app' ? 'macOS App' : '本机网页')
+      .replace('/* BROWSER_SESSION */', browserOwned ? browserSessionScript : ''), 'text/html; charset=utf-8', headers);
   }
   if (req.method === 'GET' && req.url === '/api/status') {
-    return send(200, { ...current, busy });
+    return send(200, { ...current, busy, health: activeTunnels().find(p => p.tunnelUrl === current.url)?.health });
+  }
+  if (req.method === 'GET' && req.url === '/api/tunnels') {
+    return send(200, activeTunnels().map(p => ({
+      url: p.tunnelUrl, port: p.localPort, time: p.createdAt, health: p.health,
+    })));
   }
   if (req.method === 'GET' && req.url === '/api/history') {
-    return send(200, loadJson(HISTORY_FILE, []));
+    return send(200, historyList);
   }
-  if (req.method === 'POST' && req.url === '/api/history/clear') {
-    saveJson(HISTORY_FILE, []);
-    return send(200, { ok: true });
-  }
-  if (req.method === 'POST' && req.url === '/api/history/delete') {
-    let body = '';
-    req.on('data', c => { body += c; });
-    req.on('end', () => {
-      try {
-        const { index } = JSON.parse(body || '{}');
-        const list = loadJson(HISTORY_FILE, []);
-        if (Number.isInteger(index) && index >= 0 && index < list.length) {
-          list.splice(index, 1);
-          saveJson(HISTORY_FILE, list);
-        }
-        send(200, { ok: true });
-      } catch { send(200, { ok: true }); }
-    });
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/api/start') {
-    let body = '';
-    req.on('data', c => { body += c; });
-    req.on('end', async () => {
-      try {
-        const { port, verify } = JSON.parse(body || '{}');
-        const p = Number(port);
-        if (!Number.isInteger(p) || p < 1 || p > 65535) return send(400, { error: '端口无效：请输入 1-65535 的数字' });
-        if (BLOCKED_PORTS.has(p)) return send(400, { error: `端口 ${p} 属于系统/远程管理/数据库端口，为安全起见禁止公开。本工具用于分享网页项目，请填开发服务器端口（如 3000、5173）` });
-        const url = await fullStart(p, verify !== false); // verify:false 为快速模式，其余（含缺省）都验证后返回
-        send(200, { ok: true, url, localPort: p });
-      } catch (e) {
-        send(500, { error: e.message || '启动失败' });
+  if (req.method === 'POST') {
+    const actions = new Set(['/api/history/clear', '/api/history/delete', '/api/tunnel/kill', '/api/start', '/api/stop']);
+    if (!actions.has(req.url)) return send(404, { error: '请求不存在' });
+
+    const input = await readAction(req);
+    if (input.error) return send(input.status, { error: input.error });
+    const data = input.data;
+    if (req.url === '/api/history/clear') {
+      historyList = [];
+    } else if (req.url === '/api/history/delete') {
+      if (typeof data.url !== 'string') return send(400, { error: '缺少链接' });
+      historyList = historyList.filter(h => h.url !== data.url);
+    } else if (req.url === '/api/tunnel/kill') {
+      if (typeof data.url !== 'string') return send(400, { error: '缺少链接' });
+      await killTunnelByUrl(data.url);
+    } else if (req.url === '/api/stop') {
+      await stopTunnel();
+    } else {
+      const port = data.port;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        return send(400, { error: '端口无效：请输入 1–65535 之间的数字' });
       }
-    });
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/api/stop') {
-    stopTunnel();
+      if (port === LISTEN_PORT || BLOCKED_PORTS.has(port)) {
+        return send(400, { error: '此端口不能公开。请填写你的网页服务端口，例如 3000 或 5173。' });
+      }
+      if (busy) return send(409, { error: '正在处理上一个请求，请稍候。' });
+      try {
+        const url = await fullStart(port, data.verify !== false);
+        return send(200, { ok: true, url, localPort: port });
+      } catch (error) {
+        return send(500, { error: error.message || '启动失败' });
+      }
+    }
     return send(200, { ok: true });
   }
   send(404, { error: 'not found' });
 });
 
-server.listen(LISTEN_PORT, '127.0.0.1', () => {
-  console.log(`隧道分享工具已就绪： http://127.0.0.1:${LISTEN_PORT}`);
-  if (process.argv.includes('--open')) {
-    // win 的 start 是 cmd 内建命令，需经 cmd /c 调用
-    const openCmd = os.platform() === 'darwin' ? 'open' : os.platform() === 'win32' ? 'cmd' : 'xdg-open';
-    const openArgs = os.platform() === 'win32' ? ['/c', 'start', '', `http://127.0.0.1:${LISTEN_PORT}`] : [`http://127.0.0.1:${LISTEN_PORT}`];
-    setTimeout(() => spawn(openCmd, openArgs, { detached: true, stdio: 'ignore' }).unref(), 800);
+// The port bind is the lock. A read-only probe explains who owns it.
+function findActiveEntry() {
+  return new Promise(resolve => {
+    const request = http.get({ host: '127.0.0.1', port: LISTEN_PORT, path: '/api/instance', agent: false }, response => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => {
+        body += chunk;
+        if (body.length > 512) { resolve(null); request.destroy(); }
+      });
+      response.on('end', () => {
+        try {
+          const info = JSON.parse(body);
+          resolve(response.statusCode === 200 && info.product === 'VoidBridge' ? info.entry : null);
+        } catch { resolve(null); }
+      });
+      response.on('error', () => resolve(null));
+    });
+    const timer = setTimeout(() => { resolve(null); request.destroy(); }, 1200);
+    request.once('close', () => clearTimeout(timer));
+    request.once('error', () => resolve(null));
+  });
+}
+
+server.on('error', async error => {
+  if (error.code !== 'EADDRINUSE') {
+    console.error(error.message);
+    process.exitCode = 1;
+    return;
+  }
+  const activeEntry = await findActiveEntry();
+  if (activeEntry === 'app') {
+    console.error('虚渡 App 正在运行，请继续使用 App。切换到网页时，先退出 App，再双击「启动.command」。');
+    process.exitCode = 73;
+  } else if (activeEntry === 'web') {
+    console.error('虚渡网页模式正在运行。请继续使用已打开的页面。关闭全部虚渡标签页后，网页模式会自动退出。');
+    process.exitCode = 74;
+  } else {
+    console.error('端口 9800 已被其他程序占用。请检查占用程序，再重新启动虚渡。');
+    process.exitCode = 75;
   }
 });
 
-/* 退出时带走隧道子进程（自动启动的本地服务保留运行，不打扰你的项目） */
-process.on('SIGINT', () => { stopTunnel(); process.exit(0); });
-process.on('SIGTERM', () => { stopTunnel(); process.exit(0); });
-/* 兜底：未捕获异常也要先清掉全部隧道再退出，避免 cloudflared 成孤儿进程、公网暴露无人管理 */
-process.on('uncaughtException', e => { console.error('[未捕获异常]', e); stopTunnel(); process.exit(1); });
+server.listen(LISTEN_PORT, '127.0.0.1', () => {
+  // 启动即清空历史记录：隐私保护。每次运行从空白待命开始，别人打开页面不会看到旧记录；
+  // 仅保留本次运行期间新产生的公网地址（重启后旧地址与旧记录一并清空）。
+  historyList = [];
+  console.log(`虚渡 VoidBridge已就绪： http://127.0.0.1:${LISTEN_PORT}`);
+  if (browserOwned) {
+    waitForBrowser(45000);
+    setTimeout(() => {
+      const url = `http://127.0.0.1:${LISTEN_PORT}`;
+      if (os.platform() === 'win32') {
+        exec(`start "" "${url}"`);
+      } else if (os.platform() === 'darwin') {
+        exec(`open "${url}"`);
+      } else {
+        exec(`xdg-open "${url}"`);
+      }
+    }, 800);
+  }
+});
+
+/* 退出时带走隧道子进程 */
+let shuttingDown = false;
+async function shutdown(code = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  clearTimeout(browserIdleTimer);
+  for (const tab of browserTabs) tab.end();
+  server.close();
+  await stopTunnel();
+  process.exit(code);
+}
+for (const signal of ['SIGINT', 'SIGHUP', 'SIGTERM']) process.on(signal, () => shutdown());
+const appParent = Number(process.env.VOIDBRIDGE_APP_PID);
+if (entry === 'app' && Number.isSafeInteger(appParent) && appParent > 1) {
+  // A force-quit skips AppKit's normal termination callback.
+  const checkParent = () => { if (process.ppid !== appParent) shutdown(); };
+  setInterval(checkParent, 1000).unref();
+  checkParent();
+}
+process.on('uncaughtException', error => { console.error(error); shutdown(1); });
+
 process.on('unhandledRejection', e => { console.error('[未处理的 Promise 拒绝]', e); });
 
+const APP_ACTIVE_HTML = `<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>虚渡 App 正在运行</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f8f9fa;color:#202124;font:16px/1.65 system-ui,sans-serif}
+main{width:min(30rem,85vw);padding:2rem;box-sizing:border-box;background:#fff;border:1px solid #f8f9fa;border-radius:24px}
+small{color:#202124;font-weight:700;letter-spacing:.1em}h1{font-size:1.65rem;margin:.6rem 0}p{margin:.6rem 0}
+</style>
+<main><small>虚渡 VOIDBRIDGE</small><h1>虚渡 App 正在运行</h1>
+<p>请继续在 App 里管理当前的分享链接。</p>
+<p>想切换到网页？先退出 App，再双击「启动.command」。切换会结束本次会话的临时链接。</p></main></html>`;
+ 
 /* ================= 内联页面（Google 彩虹风 · 纯 CSS/SVG 手绘 · 无 emoji） ================= */
 const PAGE_HTML = `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>隧道分享工具</title>
+<title>虚渡 VoidBridge</title>
 <style>
+  /* ===== Google Material Design · 单层干净样式 ===== */
+  :root{color-scheme:light;accent-color:#1a73e8;
+    --ink:#202124;--muted:#5f6368;--faint:#80868b;--paper:#f8f9fa;--white:#fff;--line:#e8eaed;--line-strong:#dadce0;
+    --blue:#1a73e8;--blue-hover:#185abc;--blue-soft:#e8f0fe;--blue-ink:#174ea6;
+    --green:#188038;--green-soft:#e6f4ea;--red:#d93025;--red-soft:#fce8e6;
+    --shadow-1:0 1px 2px rgba(60,64,67,.3),0 1px 3px 1px rgba(60,64,67,.15);
+    --shadow-2:0 1px 3px rgba(60,64,67,.12),0 8px 24px rgba(60,64,67,.12);
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     min-height: 100vh; display: flex; align-items: center; justify-content: center;
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
-    background: #F6F8FC; color: #202124; -webkit-font-smoothing: antialiased; padding: 24px;
+    font-family: "Google Sans", -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+    background: var(--paper); color: var(--ink); -webkit-font-smoothing: antialiased; padding: 24px;
   }
   .wrap { display: flex; gap: 20px; align-items: stretch; justify-content: center; width: 100%; max-width: 980px; }
 
   .card {
-    width: min(600px, 100%); flex-shrink: 0; background: #FFFFFF; border-radius: 36px;
-    padding: 44px 44px 36px; box-shadow: 0 14px 44px rgba(32,33,36,0.10);
+    width: min(600px, 100%); flex-shrink: 0; background: var(--white); border-radius: 24px;
+    border: 1px solid var(--line); padding: 36px 36px 30px; box-shadow: var(--shadow-2);
     position: relative; overflow: hidden;
   }
 
-  /* 右侧：历史记录小圆角平面（3D 倾斜视角） */
-  .history {
-    flex: 1; min-width: 250px; max-width: 320px; background: #FFFFFF; border-radius: 32px;
-    padding: 24px 20px 20px; box-shadow: 0 14px 44px rgba(32,33,36,0.10);
-    display: flex; flex-direction: column;
-    transform: perspective(800px) rotateY(-3deg) rotateX(1deg);
-    transition: transform .3s ease;
+  /* 右侧面板 */
+  .right-panel {
+    flex: 1; min-width: 260px; max-width: 330px; background: var(--white); border-radius: 24px;
+    border: 1px solid var(--line); padding: 18px 18px 16px; box-shadow: var(--shadow-2);
+    display: flex; flex-direction: column; position: relative;
   }
-  .history:hover { transform: perspective(800px) rotateY(0deg) rotateX(0deg); }
-  .h-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-shrink: 0; }
-  .h-title { display: flex; align-items: center; gap: 8px; font-size: 14.5px; font-weight: 800; }
+  .rp-tabs { display: flex; gap: 6px; background: #F1F3F4; border-radius: 999px; padding: 4px; flex-shrink: 0; margin-bottom: 12px; }
+  .rp-tab {
+    flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+    border: none; cursor: pointer; background: transparent; color: var(--muted);
+    border-radius: 999px; padding: 8px 6px; font-size: 12px; font-weight: 700; font-family: inherit;
+    transition: background .2s ease, color .2s ease, box-shadow .2s ease;
+  }
+  .rp-tab:hover { color: var(--ink); }
+  .rp-tab.active { background: var(--white); color: var(--blue); box-shadow: var(--shadow-1); }
+  .rp-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .rp-pane { display: none; flex: 1; min-height: 0; flex-direction: column; }
+  .rp-pane.show { display: flex; }
+
+  .h-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; flex-shrink: 0; }
+  .h-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; }
   .h-clear {
-    border: none; cursor: pointer; background: #F1F3F4; color: #5F6368;
-    border-radius: 999px; padding: 6px 13px; font-size: 11.5px; font-weight: 700; transition: background .2s ease;
+    border: none; cursor: pointer; background: #F1F3F4; color: var(--muted); font-family: inherit;
+    border-radius: 999px; padding: 5px 12px; font-size: 11px; font-weight: 700; transition: background .2s ease, color .2s ease;
   }
-  .h-clear:hover { background: #E8EAED; color: #D93025; }
-  .h-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 2px; }
+  .h-clear:hover { background: var(--red-soft); color: var(--red); }
+  .h-list { flex: 1; min-height: 0; max-height: 310px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 2px; }
   .h-list::-webkit-scrollbar { width: 6px; }
-  .h-list::-webkit-scrollbar-thumb { background: #E8EAED; border-radius: 999px; }
-  .h-item { background: #F8F9FA; border-radius: 16px; padding: 11px 13px; transition: background .2s ease; position: relative; }
+  .h-list::-webkit-scrollbar-thumb { background: var(--line); border-radius: 999px; }
+  .h-item { background: var(--paper); border-radius: 16px; padding: 11px 13px; transition: background .2s ease; position: relative; }
   .h-item:hover { background: #F1F3F4; }
   .h-item-inner { margin-right: 24px; }
   .h-del { position:absolute; top:8px; right:8px; width:22px; height:22px; border:none; cursor:pointer;
     background:transparent; color:#9AA0A6; border-radius:50%; display:flex; align-items:center; justify-content:center;
     transition: background .2s ease, color .2s ease; padding:0; }
-  .h-del:hover { background:#FCE8E6; color:#D93025; }
+  .h-del:hover { background: var(--red-soft); color: var(--red); }
   .h-time { font-size: 10.5px; color: #9AA0A6; font-weight: 700; margin-bottom: 4px; letter-spacing: .3px; }
-  .h-url { font-size: 12px; color: #1A73E8; font-weight: 700; word-break: break-all; cursor: pointer; line-height: 1.55; }
+  .h-url { font-size: 12px; color: var(--blue-ink); font-weight: 700; word-break: break-all; cursor: pointer; line-height: 1.55; }
   .h-url:hover { text-decoration: underline; }
-  .h-empty { font-size: 12px; color: #9AA0A6; text-align: center; padding: 30px 8px; line-height: 1.9; font-weight: 500; }
+  .h-empty { font-size: 12px; color: var(--faint); text-align: center; padding: 30px 8px; line-height: 1.9; font-weight: 500; }
 
-  /* 顶部：手绘云朵 */
+  /* 多线路模式 */
+  .ml-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-right: 2px; }
+  .ml-scroll::-webkit-scrollbar { width: 6px; }
+  .ml-scroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 999px; }
+  .ml-grid { position: relative; padding: 6px 0 14px; }
+  .ml-main-line {
+    display: inline-flex; align-items: center; gap: 7px; position: relative; z-index: 2;
+    background: var(--blue); color: #FFF; border-radius: 999px; padding: 8px 15px;
+    font-size: 12px; font-weight: 700; box-shadow: var(--shadow-1);
+  }
+  .ml-main-line::before {
+    content: ''; width: 8px; height: 8px; border-radius: 50%; background: #FFF;
+    box-shadow: 0 0 0 3px rgba(255,255,255,.3);
+  }
+  .ml-count { background: #FFF; color: var(--blue); font-size: 11px; font-weight: 800; border-radius: 999px; padding: 1px 8px; min-width: 20px; text-align: center; }
+  .ml-tree { display: flex; align-items: stretch; }
+  .ml-trunk { width: 3px; border-radius: 999px; background: var(--line); margin: 2px 0 0 16px; flex-shrink: 0; }
+  .ml-branches { display: flex; flex-direction: column; gap: 10px; flex: 1; padding-left: 14px; min-width: 0; }
+  .ml-branch { display: flex; align-items: stretch; position: relative; }
+  .ml-branch::before {
+    content: ''; position: absolute; left: -14px; top: 50%; width: 14px; height: 2.5px;
+    border-radius: 999px; background: var(--mlc, var(--blue)); opacity: .55;
+  }
+  .ml-node {
+    flex: 1; display: flex; align-items: center; gap: 10px; text-align: left; font-family: inherit;
+    background: var(--paper); border-radius: 16px; padding: 10px 12px; border: none; cursor: pointer;
+    box-shadow: inset 0 0 0 1.5px var(--line); min-width: 0;
+    transition: background .2s ease, box-shadow .2s ease, transform .15s ease;
+  }
+  .ml-node:hover { background: var(--white); box-shadow: inset 0 0 0 1.5px var(--mlc, var(--blue)); transform: translateX(2px); }
+  .ml-node:active { transform: scale(.98); }
+  .ml-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--mlc, var(--blue)); flex-shrink: 0;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--mlc, var(--blue)) 18%, transparent); }
+  .ml-tx { flex: 1; min-width: 0; }
+  .ml-tx b { display: block; font-size: 12px; font-weight: 700; color: var(--ink); }
+  .ml-tx span { display: block; font-size: 10.5px; color: var(--faint); font-weight: 600; margin-top: 1px; }
+  .ml-status { flex-shrink: 0; font-size: 9.5px; font-weight: 700; border-radius: 999px; padding: 3px 8px; background: var(--green-soft); color: var(--green); letter-spacing: .3px; }
+  .ml-status.dead { background: var(--red-soft); color: var(--red); }
+  .ml-empty { font-size: 12px; color: var(--faint); text-align: center; padding: 28px 8px 6px; line-height: 1.9; font-weight: 500; }
+  .ml-popup {
+    position: absolute; z-index: 30; left: 50%; top: 50%; transform: translate(-50%,-50%) scale(.96);
+    width: min(260px, 86%); background: var(--white); border-radius: 20px; padding: 15px 16px;
+    box-shadow: var(--shadow-2); opacity: 0; pointer-events: none;
+    transition: opacity .18s ease, transform .18s ease;
+  }
+  .ml-popup.show { opacity: 1; pointer-events: auto; transform: translate(-50%,-50%) scale(1); }
+  .ml-popup b { display: block; font-size: 12.5px; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
+  .ml-url { display: block; font-size: 11px; color: var(--blue-ink); font-weight: 700; word-break: break-all; line-height: 1.55; margin-bottom: 12px; }
+  .ml-actions { display: flex; gap: 7px; }
+  .ml-actions button {
+    flex: 1; border: none; cursor: pointer; border-radius: 999px; padding: 8px 0; font-family: inherit;
+    font-size: 11.5px; font-weight: 700; background: #F1F3F4; color: #3C4043;
+    transition: background .2s ease, color .2s ease;
+  }
+  .ml-actions button:hover { background: var(--line); }
+  .ml-actions button.danger { color: var(--red); }
+  .ml-actions button.danger:hover { background: var(--red-soft); }
+  .ml-actions button.primary { background: var(--blue); color: #FFF; }
+  .ml-actions button.primary:hover { background: var(--blue-hover); }
+  .ml-mask { position: absolute; inset: 0; z-index: 25; display: none; }
+  .ml-mask.show { display: block; }
+
+  /* 顶部品牌区：白底 + Google 蓝图标 */
   .head { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; }
-  .head h1 { font-size: 23px; font-weight: 800; letter-spacing: 0.5px; }
-  .head p { font-size: 12.5px; color: #80868B; margin-top: 4px; font-weight: 500; }
-  .rainbow { display: flex; gap: 5px; margin: 18px 0 26px; }
-  .rainbow i { width: 26px; height: 6px; border-radius: 999px; }
-  .rainbow i:nth-child(1){ background:#EA4335; } .rainbow i:nth-child(2){ background:#FBBC04; }
-  .rainbow i:nth-child(3){ background:#34A853; } .rainbow i:nth-child(4){ background:#1A73E8; }
+  .head .logo { width: 54px; height: 54px; flex-shrink: 0; display: grid; place-items: center; background: var(--blue-soft); border-radius: 16px; }
+  .head h1 { font-size: 23px; font-weight: 700; letter-spacing: 0.3px; }
+  .head p { font-size: 12.5px; color: var(--faint); margin-top: 4px; font-weight: 500; }
+  .entry-badge { display: inline-block; padding: 2px 8px; margin-left: 6px; background: var(--blue-soft); color: var(--blue-ink); border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .brand-rule { display: flex; gap: 5px; margin: 16px 0 24px; }
+  .brand-rule i { width: 26px; height: 6px; border-radius: 999px; }
+  .brand-rule i:nth-child(1){ background:#4285f4; } .brand-rule i:nth-child(2){ background:#ea4335; }
+  .brand-rule i:nth-child(3){ background:#fbbc04; } .brand-rule i:nth-child(4){ background:#34a853; }
 
-  /* 第一行：本地地址 */
+  /* 输入行 */
   .row-input { display: flex; gap: 12px; }
   .field {
     flex: 1; display: flex; align-items: center; background: #F1F3F4;
     border-radius: 999px; padding: 0 22px;
     transition: box-shadow .25s ease, background .25s ease;
   }
-  .field:focus-within { background:#FFF; box-shadow: inset 0 0 0 2px #1A73E8; }
+  .field:focus-within { background: var(--white); box-shadow: inset 0 0 0 2px var(--blue); }
   .field input {
-    flex: 1; border: none; outline: none; background: transparent;
-    font-size: 15px; font-weight: 700; color: #202124; padding: 15px 0; min-width: 0;
+    flex: 1; border: none; outline: none; background: transparent; font-family: inherit;
+    font-size: 15px; font-weight: 700; color: var(--ink); padding: 15px 0; min-width: 0;
   }
-  .field input::placeholder { color:#9AA0A6; font-weight:500; }
-  .field .prefix { color:#5F6368; font-weight:800; font-size:15px; user-select:none; }
+  .field input::placeholder { color: #9AA0A6; font-weight: 500; }
+  .field .prefix { color: var(--muted); font-weight: 700; font-size: 15px; user-select: none; margin-right: 4px; }
   .btn-main {
-    border:none; cursor:pointer; border-radius:999px; padding:0 26px;
-    font-size:14px; font-weight:800; color:#FFF; background:#1A73E8;
-    transition: background .2s ease, transform .15s ease; white-space:nowrap;
+    border: none; cursor: pointer; border-radius: 999px; padding: 0 26px; font-family: inherit;
+    font-size: 14px; font-weight: 700; color: #FFF; background: var(--blue);
+    transition: background .2s ease, transform .15s ease, box-shadow .2s ease; white-space: nowrap;
   }
-  .btn-main:hover{ background:#1765CC; } .btn-main:active{ transform:scale(.96); }
-  .btn-main:disabled{ background:#A8C7FA; cursor:default; }
+  .btn-main:hover { background: var(--blue-hover); box-shadow: var(--shadow-1); }
+  .btn-main:active { transform: scale(.96); }
+  .btn-main:disabled { background: var(--line); color: var(--faint); cursor: default; box-shadow: none; }
 
-  /* 第二行：公网地址 */
+  .secondary-row { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; color: var(--faint); font-size: 12px; }
+  .secondary-row button { border: 0; padding: 4px 0; background: none; color: var(--blue); font: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; }
+  .secondary-row button:disabled { color: var(--faint); cursor: default; text-decoration: none; }
+
+  /* 结果区 */
   .result {
-    margin-top: 24px; border-radius: 26px; padding: 22px 24px; background:#F8FBFF;
-    box-shadow: inset 0 0 0 2px #D3E3FD; display:flex; align-items:center; gap:14px; min-height:92px;
+    margin-top: 24px; border-radius: 20px; padding: 22px 24px; background: var(--paper);
+    box-shadow: inset 0 0 0 1px var(--line); display: flex; align-items: center; gap: 14px; min-height: 92px;
     transition: background .3s ease, box-shadow .3s ease; position: relative;
   }
-  .result.ok { background:#EDFAF1; box-shadow: inset 0 0 0 2px #B7E1C4; }
-  .result.error { background:#FDF3F4; box-shadow: inset 0 0 0 2px #F6C9CB; }
-  .dot { width:11px; height:11px; border-radius:50%; background:#9AA0A6; flex-shrink:0; transition: background .3s ease; }
-  .dot.on{ background:#34A853; } .dot.loading{ background:#1A73E8; animation:pulse 1s ease-in-out infinite; }
-  @keyframes pulse { 50%{ opacity:.3; } }
-  .addr { flex:1; min-width:0; }
-  .addr .label { font-size:12.5px; font-weight:800; color:#80868B; letter-spacing:.6px; margin-bottom:5px; }
-  .addr .link { font-size:15px; font-weight:700; color:#1A73E8; word-break:break-all; line-height:1.5; cursor:pointer; }
-  .addr .link:hover { text-decoration:underline; }
-  .addr .hint { font-size:14px; font-weight:500; color:#9AA0A6; line-height:1.6; }
+  .result.ok { background: var(--green-soft); box-shadow: inset 0 0 0 1px #c2dfcd; }
+  .result.error { background: var(--red-soft); box-shadow: inset 0 0 0 1px #f3c6c2; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: #9AA0A6; flex-shrink: 0; transition: background .3s ease; }
+  .dot.on { background: var(--green); }
+  .dot.loading { background: var(--blue); animation: pulse 1s ease-in-out infinite; }
+  .dot.error { background: var(--red); }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .addr { flex: 1; min-width: 0; }
+  .addr .label { font-size: 12.5px; font-weight: 700; color: var(--faint); letter-spacing: .6px; margin-bottom: 5px; }
+  .addr .link { font-size: 15px; font-weight: 700; color: var(--blue-ink); word-break: break-all; line-height: 1.5; cursor: pointer; }
+  .addr .link:hover { text-decoration: underline; }
+  .addr .hint { font-size: 14px; font-weight: 500; color: var(--faint); line-height: 1.6; }
 
-  .acts { display:flex; gap:8px; flex-shrink:0; }
+  .acts { display: flex; gap: 8px; flex-shrink: 0; }
   .btn-pill {
-    display:flex; align-items:center; gap:6px; border:none; cursor:pointer;
-    border-radius:999px; padding:10px 16px; font-size:13px; font-weight:800;
+    display: flex; align-items: center; gap: 6px; border: none; cursor: pointer; font-family: inherit;
+    border-radius: 999px; padding: 10px 16px; font-size: 13px; font-weight: 700;
     transition: background .2s ease, transform .15s ease;
   }
-  .btn-pill:active{ transform:scale(.94); }
-  .btn-pill svg{ flex-shrink:0; }
-  .btn-copy{ color:#1A73E8; background:#E8F0FE; } .btn-copy:hover{ background:#D2E3FC; }
-  .btn-copy.done{ color:#137333; background:#E6F4EA; }
-  .btn-open{ color:#5F6368; background:#F1F3F4; } .btn-open:hover{ background:#E8EAED; }
+  .btn-pill:active { transform: scale(.94); }
+  .btn-pill svg { flex-shrink: 0; }
+  .btn-copy { color: var(--blue-ink); background: var(--blue-soft); }
+  .btn-copy:hover { background: #d2e3fc; }
+  .btn-copy.done { color: var(--green); background: var(--green-soft); }
+  .btn-open { color: var(--muted); background: #F1F3F4; }
+  .btn-open:hover { background: var(--line); }
 
-  /* "i" 信息按钮 + 气泡提示 */
-  .btn-info {
-    width: 34px; height: 34px; padding: 0; justify-content: center;
-    color:#5F6368; background:#F1F3F4; border-radius: 50%;
+  .tips { margin-top: 22px; font-size: 12px; color: var(--faint); line-height: 1.9; }
+  .feedback { margin-top: 10px; color: var(--blue-ink); font-size: 13px; font-weight: 600; }
+
+  .promo-trigger {
+    margin-top: 16px; border: 0; border-radius: 999px; background: var(--blue-soft); color: var(--blue-ink);
+    padding: 10px 20px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: background .2s;
   }
-  .btn-info:hover{ background:#E8EAED; color:#1A73E8; }
-  .info-pop {
-    position: absolute; top: 50%; right: 118px; transform: translateY(-50%);
-    width: 250px; background: #202124; color: #F1F3F4;
-    border-radius: 16px; padding: 14px 16px; font-size: 12.5px; line-height: 1.7;
-    font-weight: 500; z-index: 20; display: none;
-    box-shadow: 0 10px 28px rgba(32,33,36,0.3);
-  }
-  .info-pop::after {
-    content: ''; position: absolute; right: -6px; top: 50%; transform: translateY(-50%) rotate(45deg);
-    width: 12px; height: 12px; background: #202124; border-radius: 2px;
-  }
-  .info-pop b { color: #8AB4F8; }
+  .promo-trigger:hover { background: #d2e3fc; }
 
-  .tips { margin-top:22px; font-size:12px; color:#9AA0A6; line-height:1.9; text-align:center; }
+  .quick-help { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; font-size: 12px; line-height: 1.7; color: var(--muted); }
+  .quick-help summary { cursor: pointer; font-weight: 600; }
+  .quick-help summary:hover { color: var(--blue); }
+  .quick-help p { margin-top: 8px; }
 
-  /* 顶部「怎么用」按钮（窄屏自动换行到标题下方右侧） */
-  .head { flex-wrap:wrap; }
-  .btn-guide {
-    margin-left:auto; display:flex; align-items:center; gap:7px; border:none; cursor:pointer;
-    background:#F1F3F4; color:#3C4043; border-radius:999px; padding:9px 16px;
-    font-size:12.5px; font-weight:800; flex-shrink:0; align-self:flex-start;
-    transition: background .2s ease, color .2s ease, transform .15s ease;
-  }
-  .btn-guide:hover { background:#E8EAED; color:#1A73E8; }
-  .btn-guide:active { transform:scale(.94); }
+  /* 宣传片弹层：flex 全屏居中，WKWebView / 浏览器均稳定居中 */
+  .promo-overlay { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; background: rgba(32,33,36,.55); padding: 24px; box-sizing: border-box; }
+  .promo-overlay.show { display: flex; }
+  .promo-box { background: var(--white); border-radius: 24px; box-shadow: var(--shadow-2); padding: 18px 20px 20px; width: min(860px, 100%); box-sizing: border-box; animation: promoIn .22s cubic-bezier(.2,0,0,1); }
+  @keyframes promoIn { from { opacity: 0; transform: translateY(14px) scale(.98); } to { opacity: 1; transform: none; } }
+  .promo-top { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 14px; }
+  .promo-top strong { font-size: 17px; font-weight: 600; }
+  .promo-top button { border: 0; border-radius: 999px; background: var(--blue-soft); color: var(--blue-ink); padding: 9px 18px; font: inherit; font-weight: 600; cursor: pointer; transition: background .2s; }
+  .promo-top button:hover { background: #d2e3fc; }
+  .promo-box video { display: block; width: 100%; aspect-ratio: 16/9; background: #f1f3f4; border-radius: 14px; }
 
-  /* 两张半透明圆角入口卡（点击弹出详情，图标圆保留通用） */
-  .duo { margin-top:26px; display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-  .duo-card { display:flex; align-items:center; gap:12px; border:none; cursor:pointer; text-align:left;
-    background:rgba(248,250,252,.78); box-shadow: inset 0 0 0 1.5px #E8EAED; border-radius:20px; padding:14px 15px;
-    transition: box-shadow .2s ease, background .2s ease, transform .15s ease; }
-  .duo-card:hover { background:rgba(232,240,254,.55); box-shadow: inset 0 0 0 1.5px #D2E3FC; }
-  .duo-card:active { transform:scale(.98); }
-  .duo-card .adv-ic { width:36px; height:36px; }
-  .duo-tx { flex:1; min-width:0; }
-  .duo-tx b { display:block; font-size:13px; font-weight:800; color:#202124; }
-  .duo-tx i { display:block; font-style:normal; font-size:11.5px; color:#80868B; font-weight:600; margin-top:2px; }
-  .duo-card .chev { color:#9AA0A6; flex-shrink:0; }
-  .adv-ic { width:38px; height:38px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
-  .adv-ic.b { background:#E8F0FE; color:#1A73E8; }
-  .adv-ic.y { background:#FEF7E0; color:#EA8600; }
-  .adv-ic.g { background:#E6F4EA; color:#137333; }
-  .adv-ic.r { background:#FCE8E6; color:#D93025; }
-
-  /* 「怎么用」引导浮层 */
-  .guide-mask { position:fixed; inset:0; z-index:100; display:none; align-items:center; justify-content:center;
-    background:rgba(32,33,36,.45); backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px); padding:22px; }
-  .guide-mask.show { display:flex; }
-  .guide { position:relative; width:min(480px,100%); max-height:min(86vh,720px); overflow-y:auto;
-    background:#FFF; border-radius:28px; padding:24px 22px 20px; box-shadow:0 24px 64px rgba(32,33,36,.28);
-    scrollbar-width:none; -ms-overflow-style:none; }
-  .guide::-webkit-scrollbar { display:none; }
-  .g-close { position:absolute; top:14px; right:14px; width:30px; height:30px; border:none; cursor:pointer;
-    background:#F1F3F4; color:#5F6368; border-radius:50%; display:flex; align-items:center; justify-content:center;
-    transition:background .2s ease, color .2s ease; }
-  .g-close:hover { background:#E8EAED; color:#202124; }
-  .g-head h2 { font-size:18px; font-weight:800; padding-right:34px; }
-  .g-head p { font-size:12px; color:#80868B; font-weight:500; margin-top:4px; }
-  .g-steps { margin-top:16px; display:flex; flex-direction:column; gap:11px; }
-  .g-step { display:flex; gap:11px; align-items:flex-start; }
-  .g-num { width:24px; height:24px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center;
-    font-size:12.5px; font-weight:800; font-style:normal; margin-top:1px; }
-  .g-num.b { background:#E8F0FE; color:#1A73E8; }
-  .g-num.y { background:#FEF7E0; color:#EA8600; }
-  .g-num.g { background:#E6F4EA; color:#137333; }
-  .g-num.r { background:#FCE8E6; color:#D93025; }
-  .g-step b { display:block; font-size:13px; font-weight:800; color:#202124; }
-  .g-step span.d { display:block; font-size:12px; color:#5F6368; line-height:1.6; font-weight:500; margin-top:2px; }
-  .g-sub { margin:18px 0 10px; display:flex; align-items:center; gap:10px; font-size:12.5px; font-weight:800; color:#3C4043; flex-shrink:0; }
-  .g-line { flex:1; height:2px; border-radius:999px; background:#F1F3F4; }
-  .g-conds { display:flex; flex-direction:column; gap:9px; }
-  .g-cond { display:flex; gap:11px; align-items:flex-start; background:#F8F9FA; border-radius:16px; padding:11px 13px; }
-  .g-cond .adv-ic { width:30px; height:30px; }
-  .g-cond b { display:block; font-size:12.5px; font-weight:800; color:#202124; }
-  .g-cond span.d { display:block; font-size:12px; color:#5F6368; line-height:1.55; font-weight:500; margin-top:2px; }
-  .g-note { margin-top:12px; background:#F8F9FA; border-radius:12px; padding:10px 12px;
-    font-size:12px; color:#5F6368; line-height:1.65; font-weight:500; }
-
-  /* 获取方式选择弹窗（无动画，直接出现） */
-  .mode-mask { position:fixed; inset:0; z-index:110; display:none; align-items:center; justify-content:center;
-    background:rgba(32,33,36,.45); backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px); padding:22px; }
-  .mode-mask.show { display:flex; }
-  .mode { position:relative; width:min(400px,100%); background:#FFF; border-radius:24px; padding:22px 20px 14px; box-shadow:0 24px 64px rgba(32,33,36,.28); }
-  .mode-wide { width:min(500px,100%); max-height:min(86vh,720px); overflow-y:auto; scrollbar-width:none; -ms-overflow-style:none; }
-  .mode-wide::-webkit-scrollbar { display:none; }
-  .m-title { font-size:16.5px; font-weight:800; padding-right:36px; }
-  .m-sub { font-size:12px; color:#80868B; font-weight:500; margin:4px 0 14px; }
-  .m-opt { width:100%; display:flex; gap:12px; align-items:flex-start; text-align:left; border:none; cursor:pointer;
-    background:#F8F9FA; border-radius:16px; padding:13px 14px; margin-bottom:9px; transition:background .2s ease; }
-  .m-opt:hover { background:#F1F3F4; }
-  .m-opt:active { transform:scale(.985); }
-  .m-tx b { display:block; font-size:13px; font-weight:800; color:#202124; }
-  .m-tx i { display:block; font-style:normal; font-size:12px; color:#5F6368; line-height:1.55; font-weight:500; margin-top:2px; }
-  .m-tag { display:inline-block; font-size:10px; font-weight:800; padding:1px 7px; border-radius:999px; margin-left:6px; vertical-align:middle; }
-  .m-tag.rec { background:#E6F4EA; color:#137333; }
-  .m-caution { display:block; font-size:11.5px; color:#D93025; font-weight:700; margin-top:2px; }
-  .m-cancel { display:block; margin:2px auto 0; border:none; background:none; cursor:pointer;
-    font-size:12.5px; font-weight:700; color:#80868B; padding:8px 14px; border-radius:999px; transition:color .2s ease; }
-  .m-cancel:hover { color:#202124; }
-
+  :focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+  @media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
   @media (max-width: 920px) {
     body { align-items: flex-start; }
     .wrap { flex-direction: column; align-items: center; }
-    .history { width: 100%; max-width: 600px; max-height: 340px; }
+    .right-panel { width: 100%; max-width: 600px; max-height: 360px; }
   }
   @media (max-width: 600px) {
-    .duo { grid-template-columns: 1fr; }
-    .card { padding: 32px 24px 28px; }
-    .guide { padding: 20px 16px 16px; }
+    .card { padding: 25px 18px; }
+    .row-input { flex-direction: column; }
+    .btn-main { width: 100%; padding: 14px 0; }
+    .result { flex-wrap: wrap; }
   }
 </style>
 </head>
@@ -723,32 +742,28 @@ const PAGE_HTML = `<!doctype html>
   <div class="wrap">
     <main class="card">
       <div class="head">
-        <svg width="54" height="54" viewBox="0 0 52 52" fill="none">
+        <span class="logo"><svg width="32" height="32" viewBox="0 0 52 52" fill="none">
           <path d="M14 34 C7 34 4 29 6 25 C8 21 13 20 15 22 C15 15 21 10 27 12 C32 13 35 17 35 21 C41 20 45 24 44 29 C43 33 39 34 36 34 Z"
-                fill="#E8F0FE" stroke="#1A73E8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M18 40 L16 46 M26 40 L25 47 M34 40 L36 46" stroke="#34A853" stroke-width="2.4" stroke-linecap="round"/>
-        </svg>
+                fill="#ffffff" stroke="#1a73e8" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M18 40 L16 46 M26 40 L25 47 M34 40 L36 46" stroke="#1a73e8" stroke-width="2.8" stroke-linecap="round"/>
+        </svg></span>
         <div>
-          <h1>隧道分享工具</h1>
-          <p>输入本地地址，一键获得公网访问链接</p>
+          <h1>虚渡 <span style="font-size:0.6em;font-weight:400;color:#80868b">VoidBridge</span></h1>
+          <p>本地网页分享 <span class="entry-badge"><!-- ENTRY --></span></p>
         </div>
-        <button class="btn-guide" id="btnGuide" type="button" title="查看使用方法">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="9.4"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>
-          </svg>怎么用
-        </button>
       </div>
-      <div class="rainbow"><i></i><i></i><i></i><i></i></div>
+      <div class="brand-rule"><i></i><i></i><i></i><i></i></div>
 
       <div class="row-input">
         <label class="field">
           <span class="prefix">localhost:</span>
-          <input id="portNum" placeholder="填端口号，如 3000" inputmode="numeric" maxlength="5" autocomplete="off" />
+          <input id="portNum" aria-label="本地 HTTP 端口" placeholder="填端口号，如 3000" inputmode="numeric" maxlength="5" autocomplete="off" />
         </label>
-        <button class="btn-main" id="btnStart" disabled>获取公网地址</button>
+        <button class="btn-main" id="btnStart" type="button" disabled>验证并获取链接</button>
       </div>
 
-      <div class="result" id="result">
+      <div class="secondary-row"><button id="btnQuick" type="button" disabled>快速获取</button><span>跳过首次公网验证</span></div>
+      <div class="result" id="result" aria-live="polite">
         <span class="dot" id="dot"></span>
         <div class="addr">
           <div class="label" id="addrLabel">公网访问地址</div>
@@ -760,15 +775,6 @@ const PAGE_HTML = `<!doctype html>
               <path d="M14 4 H20 V10"/><path d="M20 4 L11 13"/><path d="M9 6 H5 A2 2 0 0 0 3 8 V19 A2 2 0 0 0 5 21 H16 A2 2 0 0 0 18 19 V15"/>
             </svg>打开
           </button>
-          <button class="btn-pill btn-info" id="btnInfo" type="button" title="小提示">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="9.4"/><path d="M12 11 V17"/><circle cx="12" cy="7.4" r="0.4" fill="currentColor"/>
-            </svg>
-          </button>
-          <div class="info-pop" id="infoPop">
-            <b>首次打开白屏？</b><br/>
-            本地项目文件较大时，第一次打开可能白屏——这是正常现象，<b>刷新再试一次</b>即可（第二次会快很多）。
-          </div>
           <button class="btn-pill btn-copy" id="btnCopy" style="display:none">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
               <rect x="9" y="9" width="12" height="12" rx="3"/>
@@ -779,344 +785,221 @@ const PAGE_HTML = `<!doctype html>
       </div>
 
       <div class="tips">
-        地址生成后复制发给对方即可，浏览器直接打开<br/>
-        每次点击生成一个新地址，旧地址在工具运行期间继续有效；关闭工具后全部失效
+        先启动要分享的本地网页。验证从本机检查公网首页是否返回 HTTP 2xx。
       </div>
 
-      <div class="duo">
-        <button class="duo-card" id="btnAdv" type="button">
-          <span class="adv-ic b">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round">
-              <path d="M12 3 L13.8 10.2 L21 12 L13.8 13.8 L12 21 L10.2 13.8 L3 12 L10.2 10.2 Z"/>
-            </svg>
-          </span>
-          <span class="duo-tx"><b>它能解决什么问题</b><i>四大核心优势</i></span>
-          <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5 L16 12 L9 19"/></svg>
-        </button>
-        <button class="duo-card" id="btnHow" type="button">
-          <span class="adv-ic y">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="5" cy="12" r="2.6"/><circle cx="12" cy="12" r="2.6"/><circle cx="19" cy="12" r="2.6"/><path d="M7.6 12 H9.4 M14.6 12 H16.4"/>
-            </svg>
-          </span>
-          <span class="duo-tx"><b>服务自动启动 · 工作原理</b><i>四步工作流</i></span>
-          <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5 L16 12 L9 19"/></svg>
-        </button>
-      </div>
+      <p id="feedback" role="status" class="feedback" hidden></p>
+      <button class="promo-trigger" type="button">观看宣传片</button>
+      <details class="quick-help">
+        <summary>分享前须知</summary>
+        <p>持有链接的人可以访问，请只分享允许公开的网页。每次最多保留 5 条活动隧道，第 6 条成功后会停止最早的一条。退出当前入口后，本次链接失效。</p>
+      </details>
     </main>
 
-    <!-- 右侧：历史记录 -->
-    <aside class="history">
-      <div class="h-head">
-        <div class="h-title">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#5F6368" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 右侧面板：历史记录 / 多线路模式 -->
+    <aside class="right-panel" id="rightPanel">
+      <div class="rp-tabs">
+        <button class="rp-tab" id="tabHistory" type="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="9"/><path d="M12 7 V12 L15.5 14"/>
-          </svg>历史记录
-        </div>
-        <button class="h-clear" id="histClear" title="清空全部历史记录">清空</button>
+          </svg><span class="tab-label">历史记录</span>
+        </button>
+        <button class="rp-tab active" id="tabMulti" type="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 7 H21 M3 12 H21 M3 17 H21"/><circle cx="7" cy="7" r="2"/><circle cx="17" cy="12" r="2"/><circle cx="10" cy="17" r="2"/>
+          </svg><span class="tab-label">活动隧道</span>
+        </button>
       </div>
-      <div class="h-list" id="histList"></div>
+      <div class="rp-body">
+        <div class="rp-pane" id="paneHistory">
+          <div class="h-head">
+            <div class="h-title">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#5F6368" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9"/><path d="M12 7 V12 L15.5 14"/>
+              </svg>本次会话
+            </div>
+            <button class="h-clear" id="histClear" title="清空全部历史记录">清空</button>
+          </div>
+          <div class="h-list" id="histList"></div>
+        </div>
+        <div class="rp-pane show" id="paneMulti">
+          <div class="ml-scroll">
+            <div class="ml-grid" id="mlGrid">
+              <div class="ml-main-line">活动隧道<span class="ml-count" id="mlCount">0</span></div>
+              <div class="ml-tree">
+                <div class="ml-trunk" id="mlTrunk" style="display:none"></div>
+                <div class="ml-branches" id="mlBranches"><div class="ml-empty">还没有活动隧道</div></div>
+              </div>
+              <div class="ml-mask" id="mlMask"></div>
+              <div class="ml-popup" id="mlPopup">
+                <b id="mlPopTitle"></b>
+                <span class="ml-url" id="mlPopUrl"></span>
+                <div class="ml-actions">
+                  <button id="mlActCopy" type="button">复制</button>
+                  <button id="mlActOpen" type="button" class="primary">打开</button>
+                  <button id="mlActDel" type="button" class="danger">停止分享</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </aside>
   </div>
 
-  <!-- 「怎么用」引导浮层 -->
-  <div class="guide-mask" id="guideMask">
-    <div class="guide">
-      <button class="g-close" id="guideClose" type="button" title="关闭">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round">
-          <path d="M5 5 L19 19 M19 5 L5 19"/>
-        </svg>
-      </button>
-      <div class="g-head">
-        <h2>怎么用</h2>
-        <p>四步完成部署与分享；跨设备使用请参照下方说明</p>
-      </div>
-      <div class="g-steps">
-        <div class="g-step">
-          <i class="g-num b">1</i>
-          <div><b>下载项目文件夹</b><span class="d">从 GitHub 仓库下载完整文件夹：点击仓库页绿色「Code」按钮，选择「Download ZIP」并解压（或使用 git clone 获取）</span></div>
-        </div>
-        <div class="g-step">
-          <i class="g-num y">2</i>
-          <div><b>启动工具</b><span class="d">进入解压后的文件夹，双击启动脚本：macOS 运行「启动.command」，Windows 运行「启动.bat」；浏览器自动打开工具页面，未打开则访问 http://127.0.0.1:9800</span></div>
-        </div>
-        <div class="g-step">
-          <i class="g-num g">3</i>
-          <div><b>生成地址</b><span class="d">在 localhost: 后输入本地服务端口号（如 3000），点击「获取公网地址」；本地服务未启动时，工具按「启动配置.json」自动启动</span></div>
-        </div>
-        <div class="g-step">
-          <i class="g-num r">4</i>
-          <div><b>分享地址</b><span class="d">复制生成的公网地址发送给访问者；对方通过浏览器直接打开即可，无需安装任何客户端</span></div>
-        </div>
-      </div>
-      <div class="g-sub">跨设备使用说明<div class="g-line"></div></div>
-      <div class="g-conds">
-        <div class="g-cond">
-          <span class="adv-ic b">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3.5 7 A2 2 0 0 1 5.5 5 H9 L11 7.5 H18.5 A2 2 0 0 1 20.5 9.5 V17 A2 2 0 0 1 18.5 19 H5.5 A2 2 0 0 1 3.5 17 Z"/>
-            </svg>
-          </span>
-          <div><b>完整分发</b><span class="d">分发时保留完整文件夹结构：「组件」目录内含 macOS 与 Windows 双平台隧道引擎，接收方无需另行下载；Node.js 缺失时自动部署便携版，不改动系统环境</span></div>
-        </div>
-        <div class="g-cond">
-          <span class="adv-ic y">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M15.5 4.5 L19.5 8.5 L8 20 H4 V16 Z"/><path d="M13 7 L17 11"/>
-            </svg>
-          </span>
-          <div><b>路径配置</b><span class="d">「启动配置.json」中的项目路径因设备而异，跨设备使用时改为目标设备上的实际路径；服务已在运行时无需配置，直接填端口即可</span></div>
-        </div>
-        <div class="g-cond">
-          <span class="adv-ic g">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="4.5" width="18" height="12.5" rx="2"/><path d="M9 20.5 H15 M12 17 V20.5"/>
-            </svg>
-          </span>
-          <div><b>运行位置</b><span class="d">工具须与被分享的服务运行在同一台电脑上（隧道指向工具所在电脑的端口）</span></div>
-        </div>
-        <div class="g-cond">
-          <span class="adv-ic r">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 7 H20"/><path d="M9 7 V4.8 A1.3 1.3 0 0 1 10.3 3.5 H13.7 A1.3 1.3 0 0 1 15 4.8 V7"/><path d="M6.5 7 L7.3 19 A2 2 0 0 0 9.3 21 H14.7 A2 2 0 0 0 16.7 19 L17.5 7"/>
-            </svg>
-          </span>
-          <div><b>清除个人数据</b><span class="d">分发前建议删除「历史记录.json」等个人使用记录，不影响任何功能</span></div>
-        </div>
-      </div>
-      <div class="g-note">首次运行的安全提示（仅出现一次）：macOS 提示"无法验证开发者"时，右键点击文件并选择"打开"；Windows 提示"已保护你的电脑"时，点击"更多信息"→"仍要运行"。</div>
-    </div>
-  </div>
-
   <!-- 获取方式选择弹窗 -->
-  <div class="mode-mask" id="modeMask">
-    <div class="mode">
-      <div class="m-title">选择获取方式</div>
-      <div class="m-sub">两种方式都会生成全新的公网地址，旧地址继续有效</div>
-      <button class="m-opt" id="optFast" type="button">
-        <span class="adv-ic y">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polygon points="13 2 3.5 13.5 11 13.5 11 22 20.5 10.5 13 10.5 13 2"/>
-          </svg>
-        </span>
-        <span class="m-tx"><b>快速获取</b><i>地址立即返回，但 DNS 全球生效需等待数十秒</i><span class="m-caution">后果：返回后可能需重试 2-3 次才能稳定打开</span></span>
-      </button>
-      <button class="m-opt" id="optVerify" type="button">
-        <span class="adv-ic b">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2.8 L19 5.6 V11 C19 16.2 16.2 19.6 12 21.2 C7.8 19.6 5 16.2 5 11 V5.6 Z"/><path d="M9 11.6 L11.2 13.8 L15.3 9.4"/>
-          </svg>
-        </span>
-        <span class="m-tx"><b>验证后获取<span class="m-tag rec">推荐</span></b><i>工具确认地址可访问后返回，只需等待 10 秒至 2 分钟；遇无效地址自动更换</i></span>
-      </button>
-      <button class="m-cancel" id="modeCancel" type="button">取消</button>
-    </div>
-  </div>
-
-  <!-- 它能解决什么问题 · 弹窗 -->
-  <div class="mode-mask" id="advMask">
-    <div class="mode mode-wide">
-      <button class="g-close" id="advClose" type="button" title="关闭">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round">
-          <path d="M5 5 L19 19 M19 5 L5 19"/>
-        </svg>
-      </button>
-      <div class="m-title">它能解决什么问题</div>
-      <div class="m-sub">四大核心优势</div>
-      <div class="g-conds">
-        <div class="g-cond">
-          <span class="adv-ic b">
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="9.2"/><path d="M2.8 12 H21.2"/><path d="M12 2.8 C15.2 5.8 15.2 18.2 12 21.2 C8.8 18.2 8.8 5.8 12 2.8 Z"/>
-            </svg>
-          </span>
-          <div><b>无需公网 IP</b><span class="d">不用路由器配置、不用找运维，家里或公司的普通网络都能把本地网站公开到外网</span></div>
-        </div>
-        <div class="g-cond">
-          <span class="adv-ic y">
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polygon points="13 2 3.5 13.5 11 13.5 11 22 20.5 10.5 13 10.5 13 2"/>
-            </svg>
-          </span>
-          <div><b>全自动代劳</b><span class="d">本地服务没起会自动启动（详见下方工作原理），缺依赖自动安装、缺组件自动下载，点一下全办好</span></div>
-        </div>
-        <div class="g-cond">
-          <span class="adv-ic g">
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 2.8 L19 5.6 V11 C19 16.2 16.2 19.6 12 21.2 C7.8 19.6 5 16.2 5 11 V5.6 Z"/><path d="M9 11.6 L11.2 13.8 L15.3 9.4"/>
-            </svg>
-          </span>
-          <div><b>免费安全通道</b><span class="d">走 Cloudflare 官方免费通道，生成 https 地址，对方用手机浏览器也能直接打开</span></div>
-        </div>
-        <div class="g-cond">
-          <span class="adv-ic r">
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M7 3.5 H17 V20.5 L12 16.5 L7 20.5 Z"/>
-            </svg>
-          </span>
-          <div><b>地址留档可查</b><span class="d">每次获取的公网地址都自动留档，新旧地址随时对比、一键复制</span></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 服务自动启动 · 工作原理 弹窗 -->
-  <div class="mode-mask" id="howMask">
-    <div class="mode mode-wide">
-      <button class="g-close" id="howClose" type="button" title="关闭">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round">
-          <path d="M5 5 L19 19 M19 5 L5 19"/>
-        </svg>
-      </button>
-      <div class="m-title">服务自动启动 · 工作原理</div>
-      <div class="m-sub">端口无服务时的四步工作流</div>
-      <div class="g-steps">
-        <div class="g-step">
-          <i class="g-num b">1</i>
-          <div><b>端口探测</b><span class="d">获取地址前，先探测本地端口是否已有服务在运行</span></div>
-        </div>
-        <div class="g-step">
-          <i class="g-num y">2</i>
-          <div><b>读取映射</b><span class="d">依据「启动配置.json」中端口与项目的对应关系，定位目标项目</span></div>
-        </div>
-        <div class="g-step">
-          <i class="g-num g">3</i>
-          <div><b>启动项目</b><span class="d">预检通过后在项目目录执行启动命令；依赖缺失时自动先行安装</span></div>
-        </div>
-        <div class="g-step">
-          <i class="g-num r">4</i>
-          <div><b>就绪接驳</b><span class="d">轮询确认端口就绪后，无缝接入公网隧道</span></div>
-        </div>
-      </div>
-      <div class="g-note">未配置映射的端口不会自动启动，将以明确提示代替；如需为端口添加方案，编辑「启动配置.json」即可。</div>
-    </div>
-  </div>
-
 <script>
   var $ = function(id){ return document.getElementById(id); };
   var input=$('portNum'), btn=$('btnStart'), result=$('result'), dot=$('dot'), mainText=$('mainText'),
       btnOpen=$('btnOpen'), btnCopy=$('btnCopy'), copyLabel=$('copyLabel'), addrLabel=$('addrLabel');
-  var currentUrl=null, pollTimer=null, stateUrl=null;
-  var infoPop=$('infoPop');
-
-  // 「怎么用」引导浮层：按钮打开；点关闭、点遮罩、按 Esc 都能关
-  var guideMask=$('guideMask');
-  function closeGuide(){ guideMask.classList.remove('show'); }
-  $('btnGuide').addEventListener('click', function(){ guideMask.classList.add('show'); });
-  $('guideClose').addEventListener('click', closeGuide);
-  guideMask.addEventListener('click', function(e){ if(e.target===guideMask) closeGuide(); });
-  document.addEventListener('keydown', function(e){
-    if(e.key!=='Escape') return;
-    closeGuide();
-    var pops=document.querySelectorAll('.mode-mask.show');
-    for(var i=0;i<pops.length;i++) pops[i].classList.remove('show');
-  });
-
-  // "i" 小提示：点击开关气泡，点页面其他位置关闭
-  $('btnInfo').addEventListener('click', function(e){
-    e.stopPropagation();
-    infoPop.style.display = infoPop.style.display==='block' ? 'none' : 'block';
-  });
-  document.addEventListener('click', function(e){
-    if(!infoPop.contains(e.target)) infoPop.style.display='none';
-  });
-
+  var currentUrl=null, pollTimer=null, stateUrl=null, lastHealth=null;
   function setState(state, text, url){
-    dot.className='dot'+(state==='on'?' on':state==='loading'?' loading':'');
-    // 没有公网地址时不再显示那行小字标签，有地址时才出现
-    addrLabel.style.display = state==='on' ? '' : 'none';
+    dot.className='dot'+(state==='on'?' on':state==='loading'?' loading':state==='error'?' error':'');
     mainText.className = state==='on' ? 'link' : 'hint';
-    mainText.style.color = state==='error' ? '#D93025' : '';
-    mainText.textContent=text;
+    mainText.style.color = state==='error' ? '#d93025' : '';
+    if(mainText.textContent!==text) mainText.textContent=text;
     result.className='result'+(state==='on'?' ok':state==='error'?' error':'');
     currentUrl=url||null;
     btnOpen.style.display = url?'flex':'none';
     btnCopy.style.display = url?'flex':'none';
     copyLabel.textContent='复制'; btnCopy.classList.remove('done');
-    mainText.onclick = url ? function(){ window.open(url,'_blank'); } : null;
+    mainText.onclick = url ? function(){ openOutside(url); } : null;
   }
 
   // 只允许数字：粘贴/输入一律过滤
   input.addEventListener('input', function(){
-    var v = input.value.replace(/\\D/g,'').slice(0,5);
+    var v = input.value.replace(/\D/g,'').slice(0,5);
     if(v !== input.value) input.value = v;
-    btn.disabled = v.length === 0;
+    updateButtons();
   });
 
-  function copyText(t){
-    if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(t).catch(function(){}); }
-    else{
-      var ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta);
-      ta.select(); try{document.execCommand('copy');}catch(e){} ta.remove();
+  async function copyText(t){
+    try{
+      if(navigator.clipboard){ await navigator.clipboard.writeText(t); return true; }
+    }catch(e){}
+    var ta=document.createElement('textarea');
+    ta.value=t; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select();
+    try{ return document.execCommand('copy'); }
+    catch(e){ return false; }
+    finally{ ta.remove(); }
+  }
+
+  async function copyLink(url){
+    var copied=await copyText(url);
+    feedback(copied ? '链接已复制' : '无法写入剪贴板，请手动选中链接复制。');
+  }
+
+  // APP 内优先用内置浏览器打开，网页端回退新标签页
+  function openOutside(u){
+    if(!u) return;
+    if(window.VoidBridgeApp && window.VoidBridgeApp.openUrl){ window.VoidBridgeApp.openUrl(u); }
+    else { window.open(u,'_blank','noopener'); }
+  }
+
+  var quick=$('btnQuick'), submitting=false, connected=true, statusBusy=false, revision=0, polling=false;
+  var actionError=false;
+  function updateButtons(){
+    btn.disabled=quick.disabled=!connected || submitting || statusBusy || !input.value;
+  }
+  function feedback(text){
+    var note=$('feedback');
+    note.textContent=text;
+    note.hidden=!text;
+  }
+  function request(path, body){
+    var options={cache:'no-store'};
+    if(body===undefined) options.signal=AbortSignal.timeout(4500);
+    if(body!==undefined){
+      options.method='POST';
+      options.headers={'Content-Type':'application/json'};
+      options.body=JSON.stringify(body);
+    }
+    return fetch(path, options).then(async function(r){
+      var data=await r.json();
+      if(!r.ok) throw new Error(data.error || '本机请求失败');
+      return data;
+    });
+  }
+
+  async function start(verify){
+    if(btn.disabled) return;
+    var p=Number(input.value);
+    if(!Number.isInteger(p) || p<1 || p>65535){
+      setState('error','请输入 1–65535 之间的端口号');
+      return;
+    }
+    submitting=true;
+    actionError=false;
+    revision++;
+    feedback('');
+    updateButtons();
+    setState('loading', verify ? '正在验证公网首页…' : '正在建立临时隧道…');
+    try{
+      var d=await request('/api/start',{port:p,verify:verify});
+      showLink(d.url,verify?'reachable':'pending');
+      switchTab('multi');
+      loadHistory(); loadTunnels();
+    }catch(e){
+      actionError=true;
+      setState('error',e.message || '启动失败，请重试');
+    }finally{
+      submitting=false;
+      revision++;
+      updateButtons();
     }
   }
 
-  // 获取方式选择弹窗：点击「获取公网地址」先选方式（快速 / 验证后），取消可关闭
-  var modeMask=$('modeMask');
-  function closeMode(){ modeMask.classList.remove('show'); }
-  function askStart(){
-    var p = input.value.replace(/\\D/g,'');
-    if(!p){ setState('error','先在 localhost: 后面填上端口号，比如 3000'); return; }
-    modeMask.classList.add('show');
-  }
-  $('optFast').addEventListener('click', function(){ closeMode(); start(false); });
-  $('optVerify').addEventListener('click', function(){ closeMode(); start(true); });
-  $('modeCancel').addEventListener('click', closeMode);
-  modeMask.addEventListener('click', function(e){ if(e.target===modeMask) closeMode(); });
-
-  // 两张入口卡 → 详情弹窗（优势 / 工作原理）：按钮开，点关闭、点遮罩关
-  function bindPop(maskId, btnId, closeId){
-    var m=$(maskId);
-    $(btnId).addEventListener('click', function(){ m.classList.add('show'); });
-    $(closeId).addEventListener('click', function(){ m.classList.remove('show'); });
-    m.addEventListener('click', function(e){ if(e.target===m) m.classList.remove('show'); });
-  }
-  bindPop('advMask','btnAdv','advClose');
-  bindPop('howMask','btnHow','howClose');
-
-  function start(verify){
-    var p = input.value.replace(/\\D/g,'');
-    if(!p){ setState('error','先在 localhost: 后面填上端口号，比如 3000'); return; }
-    btn.disabled=true;
-    setState('loading', verify ? '正在从头打通…本地没起的服务会自动启动' : '快速模式正在打通…地址返回后需几十秒全球生效');
-    fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({port:Number(p),verify:!!verify})})
-      .then(function(r){ return r.json().then(function(d){ if(!r.ok) throw new Error(d.error||'启动失败'); return d; }); })
-      .then(function(d){
-        setState('on', d.url, d.url);
-        stateUrl = d.url;
-        loadHistory();
-      })
-      .catch(function(e){ setState('error', e.message||'出错了，请重试'); })
-      .finally(function(){ btn.disabled = input.value.length === 0; });
+  function showLink(url,health){
+    stateUrl=url;
+    lastHealth=health;
+    if(health==='reachable') setState('on',url,url);
+    else if(health==='unreachable') setState('error','公网首页探测未通过 · '+url,url);
+    else setState('loading','已生成，尚未验证 · '+url,url);
   }
 
-  // 轮询：处理中的进度文案 / 断线检测，实时反映到界面（不主动点击就永远不会有地址）
-  function poll(){
-    fetch('/api/status').then(function(r){return r.json();}).then(function(s){
-      if(s.busy){
-        setState('loading', s.progress || '正在处理…');
-        stateUrl=null;
-        return;
+  async function poll(){
+    if(polling) return;
+    polling=true;
+    var requestedAt=revision;
+    try{
+      var s=await request('/api/status');
+      if(requestedAt!==revision) return;
+      var wasOffline=!connected;
+      connected=true;
+      statusBusy=s.busy;
+      if(s.busy) setState('loading',s.progress || '正在处理…');
+      else if(!submitting && !actionError){
+        if(s.running && s.url){
+          if(s.url!==stateUrl || s.health!==lastHealth || !currentUrl) showLink(s.url,s.health);
+        }else if(stateUrl || wasOffline){
+          stateUrl=null;
+          setState('idle','填入端口，建立一个临时分享链接');
+        }
       }
-      if(s.running && s.url){
-        if(s.url!==stateUrl){ stateUrl=s.url; setState('on', s.url, s.url); }
-        return;
-      }
-      if(stateUrl || currentUrl){
-        setState('idle','隧道已断开（关机或程序重启会这样），点上方按钮重新获取');
-        stateUrl=null;
-      }
-    }).catch(function(){});
+    }catch(e){
+      if(requestedAt!==revision) return;
+      connected=false;
+      statusBusy=false;
+      actionError=false;
+      setState('error',e.message.startsWith('虚渡 App') ? e.message : '本机控制台连接中断，请检查虚渡是否正在运行。');
+    }finally{
+      polling=false;
+      updateButtons();
+    }
   }
   function startPoll(){
-    if(pollTimer) clearInterval(pollTimer);
-    pollTimer=setInterval(poll,3000);
+    poll();
+    setInterval(function(){ poll(); loadTunnels(); },3000);
   }
 
   // 历史记录
   function esc(s){ return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function loadHistory(){
-    fetch('/api/history').then(function(r){return r.json();}).then(renderHistory).catch(function(){});
+    request('/api/history').then(renderHistory).catch(function(){});
+  }
+  function loadTunnels(){
+    request('/api/tunnels').then(renderMulti).catch(function(){renderMulti([]);});
   }
   function renderHistory(list){
     var box=$('histList');
@@ -1127,7 +1010,7 @@ const PAGE_HTML = `<!doctype html>
     box.innerHTML=list.map(function(h, i){
       return '<div class="h-item"><div class="h-item-inner"><div class="h-time">'+esc(h.time)+' · 端口 '+esc(String(h.port))+'</div>'+
              '<div class="h-url" data-url="'+esc(h.url)+'" title="点击复制">'+esc(h.url)+'</div></div>'+
-             '<button class="h-del" data-idx="'+i+'" title="删除该条记录">'+
+             '<button class="h-del" data-url="'+esc(h.url)+'" title="删除该条记录">'+
              '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M5 5 L19 19 M19 5 L5 19"/></svg></button></div>';
     }).join('');
   }
@@ -1135,39 +1018,135 @@ const PAGE_HTML = `<!doctype html>
     // 点击删除按钮
     var delBtn=e.target.closest ? e.target.closest('.h-del') : null;
     if(delBtn){
-      var idx=delBtn.getAttribute('data-idx');
-      if(idx!==null){
-        fetch('/api/history/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:Number(idx)})})
-          .then(loadHistory).catch(function(){});
-      }
+      request('/api/history/delete',{url:delBtn.getAttribute('data-url')})
+        .then(loadHistory).catch(function(e){feedback(e.message);});
       return;
     }
     // 点击地址复制
     var el=e.target.closest ? e.target.closest('.h-url') : null;
     if(!el) return;
-    copyText(el.getAttribute('data-url'));
-    var old=el.getAttribute('data-url');
-    el.textContent='已复制';
-    setTimeout(function(){ el.textContent=old; },1200);
+    copyLink(el.getAttribute('data-url'));
   });
   $('histClear').addEventListener('click', function(){
-    fetch('/api/history/clear',{method:'POST',headers:{'Content-Type':'application/json'}}).then(loadHistory).catch(function(){});
+    request('/api/history/clear',{}).then(loadHistory).catch(function(e){feedback(e.message);});
   });
 
-  btn.addEventListener('click', askStart);
-  input.addEventListener('keydown',function(e){ if(e.key==='Enter') askStart(); });
-  btnOpen.addEventListener('click',function(){ if(currentUrl) window.open(currentUrl,'_blank'); });
-  btnCopy.addEventListener('click',function(){
-    if(!currentUrl) return;
-    copyText(currentUrl);
-    copyLabel.textContent='已复制'; btnCopy.classList.add('done');
-    setTimeout(function(){ copyLabel.textContent='复制'; btnCopy.classList.remove('done'); },1800);
+  // ===== 右侧面板：标签切换（历史记录 / 多线路模式） =====
+  var tabHistory=$('tabHistory'), tabMulti=$('tabMulti');
+  var paneHistory=$('paneHistory'), paneMulti=$('paneMulti');
+  function switchTab(tab){
+    var isHistory = tab === 'history';
+    tabHistory.classList.toggle('active', isHistory);
+    tabMulti.classList.toggle('active', !isHistory);
+    paneHistory.classList.toggle('show', isHistory);
+    paneMulti.classList.toggle('show', !isHistory);
+  }
+  tabHistory.addEventListener('click', function(){ switchTab('history'); });
+  tabMulti.addEventListener('click', function(){ switchTab('multi'); });
+
+  // ===== 多线路模式：思维导图看板（主干 + 彩虹分支） =====
+  var ML_COLORS = ['#1a73e8','#188038','#b06000','#c5221f','#7b1fa2'];
+  var mlData = [], mlSel = -1;
+  var mlPopup=$('mlPopup'), mlMask=$('mlMask');
+
+  function renderMulti(list){
+    if (JSON.stringify(mlData) === JSON.stringify(list)) return;
+    var selectedUrl=mlData[mlSel] && mlData[mlSel].url;
+    mlData = list || [];
+    if(selectedUrl){
+      mlSel=mlData.findIndex(function(item){return item.url===selectedUrl;});
+      if(mlSel<0) mlHide();
+    }
+    $('mlCount').textContent = mlData.length;
+    var trunk=$('mlTrunk'), box=$('mlBranches');
+    if(!mlData.length){
+      trunk.style.display='none';
+      box.innerHTML='<div class="ml-empty">还没有活动隧道<br/>获取公网地址后，可以在这里停止分享</div>';
+      return;
+    }
+    trunk.style.display='';
+    box.innerHTML = mlData.map(function(h, i){
+      var c = ML_COLORS[i % ML_COLORS.length];
+      return '<div class="ml-branch" style="--mlc:'+c+'">'+
+        '<button class="ml-node" data-i="'+i+'" type="button" title="点击查看线路操作">'+
+          '<span class="ml-dot"></span>'+
+          '<span class="ml-tx"><b>线路 '+(i+1)+' · 端口 '+esc(String(h.port))+'</b><span>'+esc(h.time)+'</span></span>'+
+          '<span class="ml-status '+(h.health==='unreachable'?'dead':'')+'">'+(h.health==='reachable'?'本机探测可达':h.health==='unreachable'?'探测失败':'待验证')+'</span>'+
+        '</button></div>';
+    }).join('');
+  }
+
+  function mlShow(i){
+    if(i<0 || !mlData[i]) return;
+    mlSel=i;
+    var h=mlData[i];
+    $('mlPopTitle').textContent='线路 '+(i+1)+' · 端口 '+h.port;
+    $('mlPopUrl').textContent=h.url;
+    mlPopup.classList.add('show'); mlMask.classList.add('show');
+  }
+  function mlHide(){ mlPopup.classList.remove('show'); mlMask.classList.remove('show'); mlSel=-1; }
+
+  $('mlBranches').addEventListener('click', function(e){
+    var n = e.target.closest ? e.target.closest('.ml-node') : null;
+    if(n) mlShow(Number(n.getAttribute('data-i')));
   });
+  mlMask.addEventListener('click', mlHide);
+
+  $('mlActCopy').addEventListener('click', function(){
+    if(mlSel<0 || !mlData[mlSel]) return;
+    copyLink(mlData[mlSel].url);
+  });
+  $('mlActOpen').addEventListener('click', function(){
+    if(mlSel<0 || !mlData[mlSel]) return;
+    openOutside(mlData[mlSel].url);
+    mlHide();
+  });
+  $('mlActDel').addEventListener('click', function(){
+    if(mlSel<0 || !mlData[mlSel]) return;
+    var u=mlData[mlSel].url;
+    mlHide();
+    request('/api/tunnel/kill',{url:u})
+      .then(function(){ feedback('已停止分享'); })
+      .catch(function(e){feedback(e.message);})
+      .finally(function(){ poll(); loadTunnels(); });
+  });
+
+  btn.addEventListener('click',function(){start(true);});
+  quick.addEventListener('click',function(){start(false);});
+  input.addEventListener('keydown',function(e){ if(e.key==='Enter' && !e.isComposing) start(true); });
+  btnOpen.addEventListener('click',function(){ openOutside(currentUrl); });
+  btnCopy.addEventListener('click',function(){ if(currentUrl) copyLink(currentUrl); });
 
   // 页面一打开：先给出清晰的待办提示（此时还没有任何公网地址），再开始轮询 + 拉取历史
-  setState('idle','填好端口号、点「获取公网地址」，这里会出现能发给任何人的公网链接');
+  setState('idle','填入本地端口，建立一个临时分享链接');
+  /* BROWSER_SESSION */
   startPoll();
   loadHistory();
+  loadTunnels();
+</script>
+<div class="promo-overlay" id="promoOverlay" role="dialog" aria-modal="true" aria-labelledby="promo-title"><div class="promo-box"><div class="promo-top"><strong id="promo-title">虚渡 · 30 秒产品介绍</strong><button type="button" id="promo-close">关闭</button></div><video controls playsinline preload="none" data-src="/media/voidbridge-promo.mp4?v=3"></video></div></div>
+<script>
+(()=>{
+ const overlay=document.getElementById('promoOverlay'),video=overlay.querySelector('video');
+ const key='voidbridge-console-promo-v3';
+ function show(){
+   if(overlay.classList.contains('show'))return;
+   if(!video.src) video.src=video.dataset.src;
+   overlay.classList.add('show');
+   video.play().catch(()=>{});
+ }
+ function hide(){ overlay.classList.remove('show'); video.pause(); }
+ document.getElementById('promo-close').addEventListener('click',hide);
+ overlay.addEventListener('click',function(e){ if(e.target===overlay) hide(); });
+ document.addEventListener('keydown',function(e){ if(e.key==='Escape') hide(); });
+ document.querySelector('.promo-trigger').addEventListener('click',show);
+ let firstVisit=true;
+ try{ firstVisit=!localStorage.getItem(key); }catch(e){}
+ if(firstVisit) requestAnimationFrame(()=>{
+   show();
+   try{localStorage.setItem(key,'1');}catch(e){}
+ });
+})();
 </script>
 </body>
 </html>`;
