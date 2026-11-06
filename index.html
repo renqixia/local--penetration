@@ -1,494 +1,235 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>隧道分享工具 · 极简内网穿透</title>
-<meta name="description" content="隧道分享工具：零注册、零配置、打开即用的一键内网穿透工具。把本地服务一键映射到公网，无需公网 IP、无需路由器转发、无需账号注册。">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="虚渡 VoidBridge 将 Mac 上的本地网页变成临时 HTTPS 链接。免注册，适合原型演示、远程预览和临时联调。">
+<meta name="theme-color" content="#ffffff">
+<title>虚渡 VoidBridge · 把本地网页发出去</title>
 <style>
-  :root {
-    --bg: #F6F8FC;
-    --card: #FFFFFF;
-    --ink: #202124;
-    --sub: #5F6368;
-    --line: #E8EAED;
-    --blue: #1A73E8;
-    --blue-dark: #174EA6;
-    --blue-soft: #E8F0FE;
-    --green: #34A853;
-    --red: #EA4335;
-    --yellow: #FBBC04;
-    --orange: #EA8600;
-    --cyan: #129EAF;
-    --radius-lg: 36px;
-    --radius-md: 22px;
-    --shadow: 0 6px 24px rgba(32, 33, 36, .06);
-    --shadow-hover: 0 12px 34px rgba(26, 115, 232, .14);
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  html { scroll-behavior: smooth; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
-    background: var(--bg); color: var(--ink);
-    -webkit-font-smoothing: antialiased; line-height: 1.6;
-  }
-  a { color: inherit; text-decoration: none; }
+/* ===== Google Material Design · 干净单层样式 ===== */
+:root{
+  color-scheme:light;accent-color:#1a73e8;
+  --ink:#202124;--muted:#5f6368;--faint:#80868b;--paper:#f8f9fa;--white:#fff;--line:#e8eaed;--line-strong:#dadce0;
+  --blue:#1a73e8;--blue-hover:#185abc;--blue-soft:#e8f0fe;--blue-ink:#174ea6;
+  --g-blue:#4285f4;--g-red:#ea4335;--g-yellow:#fbbc04;--g-green:#34a853;
+  --shadow-1:0 1px 2px rgba(60,64,67,.3),0 1px 3px 1px rgba(60,64,67,.15);
+  --shadow-2:0 1px 3px rgba(60,64,67,.12),0 8px 24px rgba(60,64,67,.12);
+  --shadow-3:0 8px 40px rgba(60,64,67,.22);
+  --radius:16px;--radius-lg:24px;
+  font-family:"Google Sans",-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);line-height:1.65;-webkit-font-smoothing:antialiased}
+a{color:var(--blue)}
+a:focus-visible,summary:focus-visible,button:focus-visible{outline:2px solid var(--blue);outline-offset:3px;border-radius:4px}
+h1,h2,h3,p{margin:0}
+h1,h2,h3{line-height:1.17;font-weight:700}
+h2{font-size:clamp(1.65rem,4vw,2.55rem);letter-spacing:-.02em}
+.shell{width:min(1120px,calc(100% - 48px));margin-inline:auto}
 
-  /* ---------- 顶部导航 ---------- */
-  header {
-    position: sticky; top: 0; z-index: 50;
-    background: rgba(246, 248, 252, .82);
-    backdrop-filter: saturate(1.4) blur(14px);
-    -webkit-backdrop-filter: saturate(1.4) blur(14px);
-    border-bottom: 1px solid rgba(232, 234, 237, .7);
-  }
-  .nav { max-width: 1080px; margin: 0 auto; padding: 14px 24px; display: flex; align-items: center; gap: 16px; }
-  .brand { display: flex; align-items: center; gap: 11px; font-weight: 800; font-size: 17px; letter-spacing: .2px; }
-  .brand svg { width: 34px; height: 34px; display: block; }
-  .nav-links { display: flex; align-items: center; gap: 6px; margin-left: auto; }
-  .nav-links a { font-size: 14px; color: var(--sub); padding: 8px 12px; border-radius: 999px; transition: color .2s ease, background .2s ease; }
-  .nav-links a:hover { color: var(--blue); background: #FFFFFF; }
-  .nav-cta {
-    margin-left: 6px; font-size: 14px; font-weight: 700; color: #FFF; background: var(--blue);
-    padding: 9px 18px; border-radius: 999px; transition: background .2s ease, transform .15s ease;
-  }
-  .nav-cta:hover { background: var(--blue-dark); }
-  .nav-cta:active { transform: scale(.96); }
+/* 顶栏 */
+.top{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:16px 0;background:var(--white);border-bottom:1px solid var(--line)}
+.top-inner{width:min(1120px,calc(100% - 48px));margin-inline:auto;display:flex;align-items:center;justify-content:space-between;gap:18px}
+.brand{display:flex;align-items:center;gap:11px;text-decoration:none;font-weight:700;white-space:nowrap;color:var(--ink)}
+.mark{display:grid;place-items:center;width:36px;height:36px;background:var(--blue);color:#fff;border-radius:12px}
+.mark svg{width:22px}
+.nav{display:flex;gap:23px;font-size:.9rem;color:var(--muted)}
+.nav a{text-decoration:none;color:var(--muted);font-weight:500}
+.nav a:hover{color:var(--blue)}
 
-  /* ---------- 主体容器 ---------- */
-  main { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
-  section { padding: 56px 0 8px; }
+/* Hero */
+.hero{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,.88fr);gap:clamp(24px,5vw,72px);align-items:center;padding:clamp(48px,8vw,96px) 0 64px}
+.kicker{font:600 .78rem/1.5 "Google Sans",sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--blue);margin-bottom:16px}
+h1{font-size:clamp(2.2rem,5vw,4rem);letter-spacing:-.03em}
+h1 span{display:block;color:var(--blue)}
+.lede{font-size:clamp(1rem,2vw,1.14rem);color:var(--muted);max-width:34em;margin:22px 0 26px}
+.actions{display:flex;gap:12px;flex-wrap:wrap}
+.button{display:inline-flex;align-items:center;justify-content:center;gap:9px;border:1px solid var(--line-strong);border-radius:999px;padding:12px 24px;text-decoration:none;font-weight:600;font-size:.95rem;background:var(--white);color:var(--blue);cursor:pointer;font-family:inherit;transition:box-shadow .2s,background .2s}
+.button:hover{box-shadow:var(--shadow-1);background:#f6f9ff}
+.primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+.primary:hover{background:var(--blue-hover);box-shadow:var(--shadow-2)}
+.fine{margin-top:14px;color:var(--faint);font-size:.84rem}
 
-  /* ---------- Hero ---------- */
-  .hero { padding: 64px 0 40px; display: grid; grid-template-columns: 1.1fr .9fr; gap: 40px; align-items: center; }
-  .badge {
-    display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700;
-    color: var(--blue-dark); background: var(--blue-soft); border-radius: 999px; padding: 7px 15px;
-  }
-  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
-  h1 { font-size: clamp(34px, 6vw, 52px); line-height: 1.14; font-weight: 900; letter-spacing: .5px; margin: 18px 0 6px; }
-  .rainbow { display: flex; gap: 6px; margin: 4px 0 16px; }
-  .rainbow i { width: 26px; height: 6px; border-radius: 999px; display: block; }
-  .rainbow i:nth-child(1) { background: var(--red); }
-  .rainbow i:nth-child(2) { background: var(--yellow); }
-  .rainbow i:nth-child(3) { background: var(--green); }
-  .rainbow i:nth-child(4) { background: var(--blue); }
-  .hero p.lead { font-size: 17px; color: var(--sub); max-width: 30em; }
-  .hero .actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 30px; }
-  .btn {
-    display: inline-flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 700;
-    padding: 14px 26px; border-radius: 999px; border: none; cursor: pointer;
-    transition: background .2s ease, transform .15s ease, box-shadow .2s ease; white-space: nowrap;
-  }
-  .btn:active { transform: scale(.97); }
-  .btn-primary { color: #FFF; background: var(--blue); box-shadow: var(--shadow); }
-  .btn-primary:hover { background: var(--blue-dark); box-shadow: var(--shadow-hover); }
-  .btn-ghost { color: var(--ink); background: #FFFFFF; border: 1px solid var(--line); }
-  .btn-ghost:hover { border-color: var(--blue); color: var(--blue); }
-  .btn svg { width: 20px; height: 20px; display: block; }
-  .hero .hint { margin-top: 16px; font-size: 13px; color: var(--sub); }
+/* Hero 示意卡 */
+.preview{position:relative;overflow:hidden;border-radius:var(--radius-lg);background:var(--white);padding:24px;box-shadow:var(--shadow-2);border:1px solid var(--line)}
+.preview-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:.78rem;color:var(--muted);padding-bottom:16px;font-weight:600}
+.sample{display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}
+.sample span{font-size:.77rem;color:var(--muted);font-weight:500}
+.sample code{font-size:clamp(.75rem,1.35vw,.95rem);overflow-wrap:anywhere;font-family:ui-monospace,"SF Mono",monospace;color:var(--ink)}
+.sample.public{background:var(--blue-soft);border-color:#a8c7fa}
+.sample.public code{color:var(--blue-ink);font-weight:600}
+.connector{height:36px;display:flex;align-items:center;padding-left:22px;color:var(--blue);font-size:.75rem;gap:8px;font-weight:600}
+.preview-caption{margin-top:16px;color:var(--faint);font-size:.78rem}
 
-  /* Hero 插画 */
-  .hero-art { display: flex; justify-content: center; }
-  .hero-card {
-    width: min(400px, 100%); background: var(--card); border-radius: var(--radius-lg);
-    box-shadow: var(--shadow); padding: 26px; position: relative;
-  }
-  .hero-card .t { font-size: 13px; font-weight: 700; color: var(--sub); letter-spacing: .5px; }
-  .hero-card .t b { color: var(--ink); }
-  .hc-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-  .hc-top .t b { font-size: 15px; }
-  .hc-mac { display: flex; gap: 6px; }
-  .hc-mac i { width: 11px; height: 11px; border-radius: 50%; display: block; }
-  .hc-mac i:nth-child(1) { background: var(--red); }
-  .hc-mac i:nth-child(2) { background: var(--yellow); }
-  .hc-mac i:nth-child(3) { background: var(--green); }
-  .hc-field {
-    display: flex; align-items: center; gap: 10px; background: var(--bg); border-radius: 999px;
-    padding: 8px 8px 8px 16px; margin: 12px 0;
-  }
-  .hc-field .in { flex: 1; font-size: 14px; color: var(--ink); }
-  .hc-field .go {
-    font-size: 13px; font-weight: 700; color: #FFF; background: var(--blue);
-    border-radius: 999px; padding: 8px 16px;
-  }
-  .hc-flow { display: flex; align-items: center; gap: 8px; margin: 14px 0; }
-  .hc-link { flex: 1; font-size: 12.5px; color: var(--blue); background: var(--blue-soft); border-radius: 12px; padding: 9px 12px; word-break: break-all; }
-  .hc-arrow { color: var(--sub); font-size: 16px; font-weight: 900; }
-  .hc-result { display: flex; align-items: center; gap: 10px; background: #EDFAF1; border-radius: 16px; padding: 12px 14px; }
-  .hc-result .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
-  .hc-result span { font-size: 13px; font-weight: 600; color: #137333; }
+/* 内容带 */
+.band{border-top:1px solid var(--line);padding:56px 0}
+.section-intro{color:var(--muted);margin:12px 0 24px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.tile{background:var(--white);border:1px solid var(--line);border-radius:var(--radius);padding:24px;transition:box-shadow .2s,transform .2s}
+.tile:hover{box-shadow:var(--shadow-2)}
+.tile small{color:var(--blue);font:600 .78rem "Google Sans",sans-serif;letter-spacing:.04em}
+.tile h3{margin:12px 0 8px;font-size:1.12rem;letter-spacing:-.01em}
+.tile p,details p{font-size:.93rem;color:var(--muted)}
+.entry-note{margin-top:18px;padding:14px 18px;border-left:3px solid var(--blue);background:var(--blue-soft);border-radius:0 12px 12px 0;font-size:.91rem}
 
-  /* ---------- 通用小节标题 ---------- */
-  .sec-head { text-align: center; max-width: 640px; margin: 0 auto 36px; }
-  .sec-head h2 { font-size: clamp(24px, 3.6vw, 32px); font-weight: 900; letter-spacing: .3px; }
-  .sec-head p { margin-top: 10px; color: var(--sub); font-size: 15px; }
-  .sec-tag {
-    display: inline-block; font-size: 12px; font-weight: 800; letter-spacing: 2px; color: var(--blue);
-    background: var(--blue-soft); border-radius: 999px; padding: 6px 14px; margin-bottom: 14px;
-  }
+/* 入口切换 */
+.switch-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.switch-card{border-radius:var(--radius-lg);padding:24px;border:1px solid var(--line);background:var(--white)}
+.switch-card.featured{background:var(--blue-soft);border-color:#a8c7fa}
+.switch-card h3{margin:10px 0}
+.switch-card p{color:var(--muted)}
+kbd{font:inherit;font-weight:600;border:1px solid var(--line-strong);background:var(--white);border-radius:6px;padding:1px 7px;white-space:nowrap;box-shadow:0 1px 0 var(--line-strong)}
 
-  /* ---------- 简介卡片 ---------- */
-  .intro-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
-  .intro-card {
-    background: var(--card); border-radius: var(--radius-md); box-shadow: var(--shadow);
-    padding: 24px; text-align: center; transition: transform .2s ease, box-shadow .2s ease;
-  }
-  .intro-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-hover); }
-  .intro-card svg { width: 38px; height: 38px; margin: 0 auto 14px; display: block; }
-  .intro-card h3 { font-size: 16px; font-weight: 800; }
-  .intro-card p { font-size: 13.5px; color: var(--sub); margin-top: 6px; }
+/* FAQ */
+.faq{max-width:760px}
+.faq h2{margin-bottom:20px}
+details{border-bottom:1px solid var(--line);padding:16px 0}
+summary{cursor:pointer;font-weight:600}
+summary:hover{color:var(--blue)}
+details p{margin:8px 0 0;padding-left:1.05em}
 
-  /* ---------- 核心优势 ---------- */
-  .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
-  .feature {
-    background: var(--card); border-radius: var(--radius-md); box-shadow: var(--shadow);
-    padding: 26px 24px; transition: transform .2s ease, box-shadow .2s ease;
-  }
-  .feature:hover { transform: translateY(-4px); box-shadow: var(--shadow-hover); }
-  .feature .ico {
-    width: 52px; height: 52px; border-radius: 18px; display: flex; align-items: center; justify-content: center; margin-bottom: 16px;
-  }
-  .feature .ico svg { width: 28px; height: 28px; display: block; }
-  .feature h3 { font-size: 17px; font-weight: 800; }
-  .feature p { font-size: 14px; color: var(--sub); margin-top: 8px; }
+/* 收尾 */
+.finish{display:flex;justify-content:space-between;align-items:center;gap:24px;padding:36px;border-radius:var(--radius-lg);background:var(--blue);color:#fff;margin-bottom:56px}
+.finish h2{font-size:1.75rem}
+.finish p{margin-top:9px;color:#d2e3fc}
+.finish .button{background:#fff;color:var(--blue);border-color:#fff;flex-shrink:0}
+.finish .button:hover{background:var(--blue-soft)}
 
-  /* ---------- 三步上手 ---------- */
-  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; counter-reset: step; }
-  .step {
-    background: var(--card); border-radius: var(--radius-md); box-shadow: var(--shadow);
-    padding: 26px 24px; position: relative; overflow: hidden;
-  }
-  .step::before {
-    counter-increment: step; content: "0" counter(step);
-    position: absolute; top: -6px; right: 6px; font-size: 72px; font-weight: 900; color: rgba(26, 115, 232, .08);
-  }
-  .step .num {
-    display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px;
-    background: var(--blue); color: #FFF; font-weight: 800; font-size: 15px; border-radius: 12px; margin-bottom: 14px;
-  }
-  .step h3 { font-size: 16px; font-weight: 800; }
-  .step p { font-size: 13.5px; color: var(--sub); margin-top: 8px; }
-  .step code {
-    display: inline-block; background: var(--bg); border: 1px solid var(--line); color: var(--blue-dark);
-    font-size: 12.5px; font-weight: 600; border-radius: 8px; padding: 2px 8px; margin: 2px 0; font-family: inherit;
-  }
+.foot{border-top:1px solid var(--line);padding:24px 0 32px;display:flex;justify-content:space-between;gap:14px;color:var(--muted);font-size:.84rem}
 
-  /* ---------- 常见问题 ---------- */
-  .faq-list { max-width: 780px; margin: 0 auto; display: grid; gap: 16px; }
-  .faq { background: var(--card); border-radius: var(--radius-md); box-shadow: var(--shadow); padding: 26px; }
-  .faq .q { display: flex; gap: 14px; align-items: flex-start; font-size: 17px; font-weight: 800; }
-  .faq .q .qi { width: 42px; height: 42px; border-radius: 14px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
-  .faq .q .qi svg { width: 24px; height: 24px; display: block; }
-  .faq .a { margin: 14px 0 0 56px; color: var(--sub); font-size: 14.5px; }
-  .faq .a p + p { margin-top: 10px; }
-  .faq .a b { color: var(--ink); }
-  .faq .steps2 { margin: 12px 0 0 18px; display: grid; gap: 8px; }
-  .faq .steps2 li { }
-  .faq code { display: inline-block; background: var(--bg); border: 1px solid var(--line); color: var(--blue-dark); font-size: 13px; font-weight: 600; border-radius: 8px; padding: 1px 7px; font-family: inherit; }
-  .faq .cmd { display: block; background: #F1F3F4; border: 1px solid #DADCE0; color: #202124; padding: 10px 14px; margin-top: 10px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; border-radius: 10px; user-select: all; }
-  .faq .ok { display: flex; gap: 10px; align-items: flex-start; background: #EDFAF1; border-radius: 14px; padding: 13px 15px; margin-top: 14px; }
-  .faq .ok .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); flex-shrink: 0; margin-top: 5px; }
-  .faq .ok span { font-size: 13.5px; color: #137333; font-weight: 600; }
+/* ===== 宣传片弹层：flex 全屏居中，任何环境（含 WKWebView）都稳定居中 ===== */
+.promo-overlay{position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;background:rgba(32,33,36,.55);padding:24px;box-sizing:border-box}
+.promo-overlay.show{display:flex}
+.promo-box{background:var(--white);border-radius:var(--radius-lg);box-shadow:var(--shadow-3);padding:18px 20px 20px;width:min(860px,100%);box-sizing:border-box;animation:promoIn .22s cubic-bezier(.2,0,0,1)}
+@keyframes promoIn{from{opacity:0;transform:translateY(14px) scale(.98)}to{opacity:1;transform:none}}
+.promo-top{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px}
+.promo-top strong{font-size:17px;font-weight:600}
+.promo-top button{border:0;border-radius:999px;background:var(--blue-soft);color:var(--blue-ink);padding:9px 18px;font:inherit;font-weight:600;cursor:pointer;transition:background .2s}
+.promo-top button:hover{background:#d2e3fc}
+.promo-box video{display:block;width:100%;aspect-ratio:16/9;background:#f1f3f4;border-radius:14px}
 
-  /* ---------- 底部 CTA ---------- */
-  .cta {
-    background: var(--ink); color: #FFF; border-radius: var(--radius-lg); padding: 48px 32px;
-    text-align: center; margin: 40px 0 16px; position: relative; overflow: hidden;
-  }
-  .cta h2 { font-size: clamp(22px, 3.4vw, 30px); font-weight: 900; }
-  .cta p { color: rgba(255, 255, 255, .72); font-size: 15px; margin-top: 10px; }
-  .cta .actions { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; margin-top: 28px; }
-  .cta .btn-primary { background: #FFF; color: var(--ink); box-shadow: none; }
-  .cta .btn-primary:hover { background: var(--blue-soft); color: var(--blue-dark); }
-  .cta .btn-ghost { background: transparent; color: #FFF; border-color: rgba(255, 255, 255, .4); }
-  .cta .btn-ghost:hover { border-color: #FFF; color: #FFF; }
-  .cta .hint { margin-top: 18px; font-size: 13px; color: rgba(255, 255, 255, .6); }
-
-  /* ---------- 页脚 ---------- */
-  footer { max-width: 1080px; margin: 0 auto; padding: 24px; border-top: 1px solid var(--line); }
-  .foot { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--sub); }
-  .foot .brand { font-size: 15px; color: var(--ink); }
-  .foot .brand svg { width: 26px; height: 26px; }
-  .foot a.gh { display: inline-flex; align-items: center; gap: 8px; color: var(--sub); transition: color .2s ease; }
-  .foot a.gh:hover { color: var(--blue); }
-  .foot a.gh svg { width: 18px; height: 18px; }
-
-  /* ---------- 响应式 ---------- */
-  @media (max-width: 900px) {
-    .hero { grid-template-columns: 1fr; text-align: center; }
-    .hero .badge { margin: 0 auto; }
-    .rainbow { justify-content: center; }
-    .hero p.lead { margin: 0 auto; }
-    .hero .actions { justify-content: center; }
-    .hero-art { order: -1; }
-    .intro-grid, .feature-grid, .steps { grid-template-columns: 1fr 1fr; }
-    .nav-links a.nav-item { display: none; }
-  }
-  @media (max-width: 600px) {
-    .intro-grid, .feature-grid, .steps { grid-template-columns: 1fr; }
-    .hero { padding-top: 40px; }
-    .btn { flex: 1; justify-content: center; }
-    section { padding-top: 40px; }
-  }
+@media(max-width:760px){
+  .hero{grid-template-columns:minmax(0,1fr);padding:44px 0;gap:32px}
+  .grid{grid-template-columns:1fr}
+  .switch-grid{grid-template-columns:1fr}
+  .finish{flex-direction:column;align-items:flex-start;padding:26px}
+  .nav{gap:14px}
+  .band{padding:40px 0}
+}
+@media(max-width:420px){
+  .shell,.top-inner{width:calc(100% - 30px)}
+  .nav a:first-child{display:none}
+  .foot{flex-direction:column}
+}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
 </style>
 </head>
-<body>
-
-<header>
-  <div class="nav">
-    <div class="brand">
-      <svg viewBox="0 0 48 48" fill="none" aria-hidden="true">
-        <rect x="4" y="6" width="40" height="36" rx="14" fill="#FFFFFF" stroke="#E8EAED" stroke-width="2.4"/>
-        <path d="M14 24c2.2-5 7-8 12-8 5.4 0 9.8 3.4 11.6 8" stroke="#1A73E8" stroke-width="3.4" stroke-linecap="round"/>
-        <circle cx="20" cy="24" r="2.6" fill="#EA4335"/>
-        <circle cx="28" cy="24" r="2.6" fill="#FBBC04"/>
-        <path d="M19 30h10" stroke="#34A853" stroke-width="3" stroke-linecap="round"/>
-      </svg>
-      <span>隧道分享工具</span>
-    </div>
-    <nav class="nav-links">
-      <a class="nav-item" href="#intro">简介</a>
-      <a class="nav-item" href="#features">优势</a>
-      <a class="nav-item" href="#steps">上手</a>
-      <a class="nav-item" href="#faq">常见问题</a>
-      <a class="nav-cta" href="https://github.com/renqixia/local--penetration/releases/latest/download/%E9%9A%A7%E9%81%93%E5%88%86%E4%BA%AB%E5%B7%A5%E5%85%B7.zip">下载工具</a>
-    </nav>
-  </div>
+<body id="top">
+<header class="top">
+<div class="top-inner">
+<a class="brand" href="#top"><span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17h18M5 17v-5m14 5v-5M4 12c3 0 5-2 8-6 3 4 5 6 8 6M9 17v-3m6 3v-3"/></svg></span><span>虚渡 VoidBridge</span></a>
+<nav class="nav" aria-label="页面导航"><a href="#start">快速上手</a><a href="https://github.com/renqixia/local--penetration">GitHub ↗</a></nav>
+</div>
 </header>
-
-<main>
-
-  <!-- Hero -->
-  <section class="hero" id="top">
-    <div>
-      <span class="badge"><span class="dot"></span>零注册 · 零配置 · 打开即用</span>
-      <h1>隧道分享工具</h1>
-      <div class="rainbow"><i></i><i></i><i></i><i></i></div>
-      <p class="lead">把本地服务一键映射到公网，无需公网 IP、无需路由器端口转发、无需账号注册。输入端口，一键开启穿透，立刻获得可公开访问的地址。</p>
-      <div class="actions">
-        <a class="btn btn-primary" href="https://github.com/renqixia/local--penetration/releases/latest/download/%E9%9A%A7%E9%81%93%E5%88%86%E4%BA%AB%E5%B7%A5%E5%85%B7.zip">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v11m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          下载工具
-        </a>
-      </div>
-      <p class="hint">下载发布版压缩包并解压，双击「启动.command」(Mac) 或「启动.bat」(Windows)，浏览器会自动打开工具本页</p>
-    </div>
-    <div class="hero-art">
-      <div class="hero-card">
-        <div class="hc-top">
-          <div class="t">工具本页 · 预览</div>
-          <div class="hc-mac"><i></i><i></i><i></i></div>
-        </div>
-        <div class="t">本地服务端口</div>
-        <div class="hc-field"><span class="in">3000</span><span class="go">获取公网地址</span></div>
-        <div class="hc-flow">
-          <span class="hc-link">https://xxxx.trycloudflare.com</span>
-          <span class="hc-arrow">→</span>
-        </div>
-        <div class="hc-result"><span class="dot"></span><span>公网地址已就绪，可随时访问</span></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- 简介 -->
-  <section id="intro">
-    <div class="sec-head">
-      <span class="sec-tag">它是什么</span>
-      <h2>一款极简的内网穿透工具</h2>
-      <p>告别 ngrok、Serveo 等工具繁琐的登录、配置与额度限制。隧道分享工具把整套流程压到三步：下载、启动、输入端口。</p>
-    </div>
-    <div class="intro-grid">
-      <div class="intro-card">
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="#34A853" stroke-width="2.2"/><path d="M8.5 12.2l2.4 2.4 4.6-4.8" stroke="#34A853" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <h3>无需公网 IP</h3>
-        <p>本地服务直接穿透，不需要公网 IP 与路由器端口转发</p>
-      </div>
-      <div class="intro-card">
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4" stroke="#1A73E8" stroke-width="2.2"/><path d="M8 12h8M12 8v8" stroke="#1A73E8" stroke-width="2.2" stroke-linecap="round"/></svg>
-        <h3>无需账号注册</h3>
-        <p>没有用户体系，不实名、不登录、无额度限制套路</p>
-      </div>
-      <div class="intro-card">
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M13 2L4.5 13.5H11L9.5 22 19 10h-6.5L13 2z" stroke="#EA8600" stroke-width="2.2" stroke-linejoin="round"/></svg>
-        <h3>打开即用</h3>
-        <p>一键开启穿透，立刻获得可公开访问的公网地址</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- 核心优势 -->
-  <section id="features">
-    <div class="sec-head">
-      <span class="sec-tag">核心优势</span>
-      <h2>为你的使用体验而设计</h2>
-      <p>从下载到开隧道，每个环节都尽量省心、可靠、安全。</p>
-    </div>
-    <div class="feature-grid">
-      <div class="feature">
-        <div class="ico" style="background:#E6F4EA">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6l7-3z" stroke="#34A853" stroke-width="2"/><path d="M9 12l2 2 4-4" stroke="#34A853" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </div>
-        <h3>完全免注册免登录</h3>
-        <p>没有账号体系，没有实名认证，打开即用，零门槛上手。</p>
-      </div>
-      <div class="feature">
-        <div class="ico" style="background:#E8F0FE">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 6a2 2 0 012-2h10a2 2 0 012 2v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6z" stroke="#1A73E8" stroke-width="2"/><path d="M9 10h6M9 14h4" stroke="#1A73E8" stroke-width="2" stroke-linecap="round"/></svg>
-        </div>
-        <h3>一键极简操作</h3>
-        <p>界面只保留必要内容：输入端口、一键获取，无复杂配置、无广告弹窗。</p>
-      </div>
-      <div class="feature">
-        <div class="ico" style="background:#FEF7E0">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4" stroke="#EA8600" stroke-width="2"/><path d="M8 4v16M16 4v16" stroke="#EA8600" stroke-width="2"/></svg>
-        </div>
-        <h3>多地址并存</h3>
-        <p>每次获取开一条新隧道，旧地址在工具运行期间继续可用，最多同时保留 5 条。</p>
-      </div>
-      <div class="feature">
-        <div class="ico" style="background:#FCE8E6">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h3l2-5 3 10 2-5h4" stroke="#EA4335" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </div>
-        <h3>本地服务自动启动</h3>
-        <p>端口没有服务时，按你的配置自动拉起，缺失依赖自动安装，全程有进度提示。</p>
-      </div>
-      <div class="feature">
-        <div class="ico" style="background:#E6F7F9">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v11m0 0l-4-4m4 4l4-4" stroke="#129EAF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="#129EAF" stroke-width="2.2" stroke-linecap="round"/></svg>
-        </div>
-        <h3>驱动自动下载</h3>
-        <p>首次使用自动补齐隧道引擎并存入工具文件夹，官方源优先、镜像兜底，附大小校验防投毒。</p>
-      </div>
-      <div class="feature">
-        <div class="ico" style="background:#E9F0FD">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6l7-3z" stroke="#174EA6" stroke-width="2"/><path d="M8.5 12l2.3 2.3 4.7-4.8" stroke="#174EA6" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </div>
-        <h3>安全周全设计</h3>
-        <p>仅监听本机不暴露公网、敏感端口拦截、跨域与输入防护，历史记录可单独删除。</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- 三步上手 -->
-  <section id="steps">
-    <div class="sec-head">
-      <span class="sec-tag">三步上手</span>
-      <h2>从下载到使用，就这么简单</h2>
-      <p>整个过程不需要任何英文配置，不需要注册任何账号。</p>
-    </div>
-    <div class="steps">
-      <div class="step">
-        <div class="num">1</div>
-        <h3>下载工具</h3>
-        <p>点击「下载工具」获取整个工具包，或在 <a href="https://github.com/renqixia/local--penetration" style="color:var(--blue);font-weight:600">GitHub 仓库</a> 下载并解压。</p>
-      </div>
-      <div class="step">
-        <div class="num">2</div>
-        <h3>双击启动</h3>
-        <p>进入「隧道分享工具」文件夹，Mac 双击 <code>启动.command</code>，Windows 双击 <code>启动.bat</code>。</p>
-      </div>
-      <div class="step">
-        <div class="num">3</div>
-        <h3>输入端口</h3>
-        <p>在自动打开的工具本页输入本地服务端口，点击获取公网地址，即可分享给别人访问。</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- 常见问题 -->
-  <section id="faq">
-    <div class="sec-head">
-      <span class="sec-tag">常见问题</span>
-      <h2>首次打开的安全提示，一次搞懂</h2>
-      <p>从网上下载的工具，第一次打开时系统会弹出安全确认。这不是文件有问题，而是电脑在保护你。按下面的官方方法确认一次，之后就不会再出现。</p>
-    </div>
-    <div class="faq-list">
-      <div class="faq">
-        <div class="q">
-          <div class="qi" style="background:#E8F0FE">
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="4" stroke="#1A73E8" stroke-width="2"/><path d="M4 5l3-2h10l3 2" stroke="#1A73E8" stroke-width="2"/><path d="M9 12h6" stroke="#1A73E8" stroke-width="2.2" stroke-linecap="round"/></svg>
-          </div>
-          <span>Mac 提示「Apple 无法验证」，怎么办？</span>
-        </div>
-        <div class="a">
-          <p><b>为什么会出现：</b>工具从网上下载，还没有 Apple 付费认证的签名。这是 Apple 对所有开源软件的统一保护（Homebrew、ngrok 等工具也一样），<b>不代表文件有问题</b>。</p>
-          <p><b>解决办法（只需一次，Apple 官方标准方式）：</b></p>
-          <ol class="steps2">
-            <li>在「隧道分享工具」文件夹里，<b>右键</b>（或按住 Control 键点）<code>启动.command</code></li>
-            <li>在弹出的菜单里点「<b>打开</b>」</li>
-            <li>在确认框里点「<b>打开</b>」，终端就会正常启动工具</li>
-          </ol>
-          <p>如果右键菜单里没有「打开」，就去：<b>系统设置 → 隐私与安全性</b>，找到被拦截的 <code>启动.command</code>，点「<b>仍要打开</b>」。</p>
-          <div class="ok"><span class="dot"></span><span>放心：这只是电脑让你确认一次「这个文件是你自己要用的」，之后双击即可，不再有任何提示，也不影响电脑其它安全设置。</span></div>
-        </div>
-      </div>
-
-      <div class="faq">
-        <div class="q">
-          <div class="qi" style="background:#FEF7E0">
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="4" stroke="#EA8600" stroke-width="2"/><path d="M12 9.2v4m0 3.3v.5" stroke="#EA8600" stroke-width="2.2" stroke-linecap="round"/></svg>
-          </div>
-          <span>双击提示「没有正确的访问权限」？</span>
-        </div>
-        <div class="a">
-          <p><b>为什么会出现：</b>如果是从 GitHub 网页直接点「Download ZIP」下载的压缩包，GitHub 会<b>去掉 <code>启动.command</code> 的执行权限</b>，Mac 双击就提示没有访问权限。这不是你的电脑或工具的问题。</p>
-          <p><b>解决办法（推荐）：</b>改用本页下方「<b>下载工具</b>」按钮下载的<b>发布版压缩包</b>，它已保留了执行权限，解压后直接双击即可，不用输任何命令。</p>
-          <p><b>已下载网页版 ZIP 的备用办法：</b>打开「<b>终端</b>」（Command + 空格，输入"终端"回车），先 <code>cd</code> 到解压出的工具文件夹，再粘贴执行下面这一行：</p>
-          <code class="cmd">chmod +x 启动.command</code>
-          <div class="ok"><span class="dot"></span><span>执行一次即可，之后双击都能正常启动。这条命令只是给文件加上"可执行"权限，不涉及任何系统设置。</span></div>
-        </div>
-      </div>
-
-      <div class="faq">
-        <div class="q">
-          <div class="qi" style="background:#E6F4EA">
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="3" stroke="#34A853" stroke-width="2"/><path d="M9 12h6" stroke="#34A853" stroke-width="2.2" stroke-linecap="round"/></svg>
-          </div>
-          <span>Windows 提示「Windows 已保护你的电脑」，怎么办？</span>
-        </div>
-        <div class="a">
-          <p>首次双击 <code>启动.bat</code> 时，如果出现「Windows 已保护你的电脑」：点「<b>更多信息</b>」→ 点「<b>仍要运行</b>」即可，只此一次。</p>
-          <div class="ok"><span class="dot"></span><span>这是 Windows 对未签名程序的常规提示，和 Mac 同理：确认一次，之后正常使用。</span></div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- CTA -->
-  <section id="download">
-    <div class="cta">
-      <h2>现在开始，一键穿透你的本地服务</h2>
-      <p>下载工具包，双击启动，输入端口 —— 公网地址即刻到手。</p>
-      <div class="actions">
-        <a class="btn btn-primary" href="https://github.com/renqixia/local--penetration/releases/latest/download/%E9%9A%A7%E9%81%93%E5%88%86%E4%BA%AB%E5%B7%A5%E5%85%B7.zip">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v11m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          下载工具
-        </a>
-      </div>
-      <p class="hint">下载「发布版压缩包」并解压，Mac 双击「启动.command」、Windows 双击「启动.bat」，浏览器会自动打开工具本页</p>
-    </div>
-  </section>
-
+<main class="shell">
+<section class="hero" aria-labelledby="hero-title">
+<div>
+<p class="kicker">Version 10.0 / macOS</p>
+<h1 id="hero-title">本地跑起来，<span>发个链接就能看。</span></h1>
+<p class="lede">把 Mac 上的本地网页变成临时 HTTPS 链接。免注册，适合演示原型、让同事预览改动，或临时联调。</p>
+<div class="actions"><a class="button primary" href="https://github.com/renqixia/local--penetration/releases">查看 GitHub 发布包 ↗</a><button class="button promo-trigger" type="button">观看宣传片</button></div>
+<p class="fine">App 与本机网页二选一 · 访客用浏览器打开分享链接</p>
+</div>
+<figure class="preview" style="margin:0" aria-label="本地端口映射到公网链接示意">
+<div class="preview-head"><strong>一次分享</strong><span>流程示意</span></div>
+<div class="sample"><span>你的本地网页</span><code>http://localhost:3000</code></div>
+<div class="connector" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16m0 0l-6-6m6 6l6-6"/></svg><span>虚渡建立临时隧道</span></div>
+<div class="sample public"><span>访客打开的地址</span><code>https://example.trycloudflare.com</code></div>
+<figcaption class="preview-caption">每次生成随机地址。结束分享后，链接失效。</figcaption>
+</figure>
+</section>
+<section class="band scenarios" aria-labelledby="scenarios-title">
+<p class="kicker">适用场景</p>
+<h2 id="scenarios-title">让对方直接看到正在跑的版本</h2>
+<p class="section-intro">你的项目继续在本机运行。对方只需打开你发出的临时链接。</p>
+<div class="grid">
+<article class="tile"><small>01 / 原型演示</small><h3>给客户看一版</h3><p>本地原型刚做好，先发链接让对方点一点。演示完成后停止分享，下一版可以重新生成地址。</p></article>
+<article class="tile"><small>02 / 多端预览</small><h3>换台设备看效果</h3><p>用手机或同事的电脑打开链接，检查布局、触屏交互和真实浏览器里的表现。</p></article>
+<article class="tile"><small>03 / 临时联调</small><h3>让外部服务请求本机</h3><p>为本地 HTTP 服务临时提供公网入口。适合短时测试，需要长期固定地址的回调应使用稳定入口。</p></article>
+</div>
+</section>
+<section class="band" id="start" aria-labelledby="start-title">
+<h2 id="start-title">三步发出第一个链接</h2>
+<p class="section-intro">先在 Mac 上启动你要分享的网页。</p>
+<div class="grid">
+<article class="tile"><small>01 / 打开</small><h3>选择一个入口</h3><p>从 Releases 下载完整发布包。双击「虚渡.app」，或运行「启动.command」打开本机网页。</p></article>
+<article class="tile"><small>02 / 建立</small><h3>填入本地端口</h3><p>例如本地地址是 <code>localhost:3000</code>，填入 <code>3000</code>。默认先验证公网首页，也可以选择快速获取。</p></article>
+<article class="tile"><small>03 / 分享</small><h3>复制链接发给对方</h3><p>访客直接用浏览器打开。分享完成后，在活动隧道里停止这一条链接。</p></article>
+</div>
+</section>
+<section class="band" id="switch" aria-labelledby="switch-title">
+<p class="kicker">入口切换</p>
+<h2 id="switch-title">App 和本机网页，一次用一个</h2>
+<p class="section-intro">两个入口共用本机管理服务。先结束当前会话，再打开另一个入口。</p>
+<div class="switch-grid">
+<article class="switch-card featured"><p class="kicker">本机网页 → App</p><h3>App 会弹出「请先关闭网页模式」</h3><p>如果网页模式还在运行，App 会暂缓启动。关闭所有虚渡网页标签页，等待约 4 秒，再在 App 点「重试」。也可以在启动终端按 <kbd>Control + C</kbd> 立即结束网页模式。</p></article>
+<article class="switch-card"><p class="kicker">App → 本机网页</p><h3>先退出 App，再打开网页</h3><p>App 运行时，浏览器访问本机控制台只会显示切换提示。按 <kbd>Command + Q</kbd> 退出 App，再双击「启动.command」。</p></article>
+</div>
+<p class="entry-note"><strong>切换会结束当前会话。</strong> 已发出的临时链接会失效。如果对方还在看，等分享结束再切换。</p>
+</section>
+<section class="band" aria-labelledby="controls-title">
+<p class="kicker">使用细节</p>
+<h2 id="controls-title">发链接之前，先看这三个状态</h2>
+<p class="section-intro">控制台把链接是否已生成、是否通过本机探测，以及是否还在分享分开显示。</p>
+<div class="grid">
+<article class="tile"><small>验证后交付</small><h3>验证并获取链接</h3><p>默认先从本机检查公网首页。通过后再复制地址，适合直接发给别人预览。</p></article>
+<article class="tile"><small>先拿地址</small><h3>快速获取</h3><p>地址先返回，状态显示待验证。首页有跳转或登录时，可以先拿地址，再打开实际要分享的页面确认。</p></article>
+<article class="tile"><small>分享生命周期</small><h3>活动隧道</h3><p>最多保留五条活动隧道。可逐条停止分享；清空历史只清除记录，不会关闭隧道。</p></article>
+</div>
+</section>
+<section class="band faq" aria-labelledby="faq-title">
+<h2 id="faq-title">使用前了解这几件事</h2>
+<details><summary>介绍页、本机网页、分享链接有什么区别？</summary><p>介绍页用于了解和下载虚渡。本机网页用来在你的电脑上建立及管理隧道。分享链接把访客带到你公开的本地服务，访客无需安装虚渡。</p></details>
+<details><summary>为什么验证失败，或者链接打开后断了？</summary><p>验证模式从本机检查公网首页是否返回 HTTP 2xx。遇到跳转、登录页或其他状态时，可用快速模式并自行验证。链接可用性也取决于本地服务和 Cloudflare Quick Tunnels。</p></details>
+<details><summary>谁能看到分享出去的网页？</summary><p>持有链接的人可以访问，公网请求经 Cloudflare 转发。请只分享允许公开的页面。本机的链接历史只保留在当前会话。</p></details>
+<details><summary>我的 Mac 能运行吗？</summary><p>当前工作区的 App 构建面向 Apple Silicon 和 macOS 14 及以上。以所下载版本的发布说明为准，遇到启动问题可在 GitHub Issues 附上系统版本、芯片和提示文案。</p></details>
+</section>
+<section class="finish" aria-labelledby="finish-title">
+<div><h2 id="finish-title">把正在做的网页，发给对方看。</h2><p>从完整发布包开始，选一个入口，填入本地端口。</p></div>
+<a class="button" href="https://github.com/renqixia/local--penetration/releases">查看 GitHub 发布包 ↗</a>
+</section>
 </main>
+<footer class="foot shell"><span>虚渡 VoidBridge · 本地网页分享</span><a href="https://github.com/renqixia/local--penetration/issues">反馈问题 ↗</a></footer>
 
-<footer>
-  <div class="foot">
-    <div class="brand">
-      <svg viewBox="0 0 48 48" fill="none" aria-hidden="true">
-        <rect x="4" y="6" width="40" height="36" rx="14" fill="#FFFFFF" stroke="#E8EAED" stroke-width="2.4"/>
-        <path d="M14 24c2.2-5 7-8 12-8 5.4 0 9.8 3.4 11.6 8" stroke="#1A73E8" stroke-width="3.4" stroke-linecap="round"/>
-        <circle cx="20" cy="24" r="2.6" fill="#EA4335"/>
-        <circle cx="28" cy="24" r="2.6" fill="#FBBC04"/>
-      </svg>
-      <span>隧道分享工具</span>
-    </div>
-    <a class="gh" href="https://github.com/renqixia/local--penetration" target="_blank" rel="noopener">
-      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49v-1.7c-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.63.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.9 1.57 2.36 1.12 2.94.86.09-.67.35-1.12.63-1.38-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.7 0 0 .84-.28 2.75 1.05a9.36 9.36 0 015 0c1.91-1.33 2.75-1.05 2.75-1.05.55 1.4.2 2.44.1 2.7.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.9v2.82c0 .27.18.6.69.49A10.26 10.26 0 0022 12.25C22 6.58 17.52 2 12 2z"/></svg>
-      开源于 GitHub · renqixia/local--penetration
-    </a>
+<div class="promo-overlay" id="promoOverlay" role="dialog" aria-modal="true" aria-labelledby="promo-title">
+  <div class="promo-box">
+    <div class="promo-top"><strong id="promo-title">虚渡 · 30 秒产品介绍</strong><button type="button" id="promo-close">关闭</button></div>
+    <video controls playsinline preload="none" data-src="media/voidbridge-promo.mp4?v=3"></video>
   </div>
-</footer>
-
+</div>
+<script>
+(()=>{
+ const overlay=document.getElementById('promoOverlay'),video=overlay.querySelector('video');
+ const key='voidbridge-intro-promo-v3';
+ function show(){
+   if(overlay.classList.contains('show'))return;
+   if(!video.src) video.src=video.dataset.src;
+   overlay.classList.add('show');
+   video.play().catch(()=>{});
+ }
+ function hide(){ overlay.classList.remove('show'); video.pause(); }
+ document.getElementById('promo-close').addEventListener('click',hide);
+ overlay.addEventListener('click',e=>{ if(e.target===overlay) hide(); });
+ document.addEventListener('keydown',e=>{ if(e.key==='Escape') hide(); });
+ document.querySelector('.promo-trigger').addEventListener('click',show);
+ let firstVisit=true;
+ try{ firstVisit=!localStorage.getItem(key); }catch(e){}
+ if(firstVisit) requestAnimationFrame(()=>{
+   show();
+   try{localStorage.setItem(key,'1');}catch(e){}
+ });
+})();
+</script>
 </body>
 </html>
